@@ -71,8 +71,12 @@ def dijkstra(orig, dest, plot=False):
                 for edge2 in G.out_edges(neighbor):
                     style_active_edge((edge2[0], edge2[1], 0))
         step += 1
+    print("--> Nessun percorso trovato")
 
 def reconstruct_path(orig, dest, plot=False, algorithm=None):
+    if G.nodes[dest]["previous"] is None and dest != orig:
+        print("Nessun percorso trovato!")
+        return None
     for edge in G.edges:
         style_unvisited_edge(edge)
     dist = 0
@@ -112,36 +116,86 @@ def graph_init():
     for edge in G.edges:
         G.edges[edge]["dijkstra_uses"] = 0
 
-if __name__ == "__main__":
-    piedmont_iterations = []
-    place_name = "Turin, Piedmont, Italy"
-    #place_name = "Aosta, Aosta, Italy"
-    G = ox.graph_from_place(place_name, network_type="drive")
-
-    graph_init()
-    for i in range(10):
-
-        start = random.choice(list(G.nodes))
-        end = random.choice(list(G.nodes))
-
-        print("Running Dijkstra");
-        print("Nodes: ", len(G.nodes))
-        print("Edges: ", len(G.edges))
-        iterations = dijkstra(start, end)
-        piedmont_iterations.append(iterations)
-        print("Iterations:", iterations)
-        reconstruct_path(start, end, algorithm="dijkstra", plot=False)
-        print( "Done")
-
-    print(f"Average iterations for Dijkstra in {place_name}: {sum(piedmont_iterations) / len(piedmont_iterations)}")
-    for edge in G.edges:
-        uses = G.edges[edge].get("dijkstra_uses", 0)
-        if uses > 0:
-            G.edges[edge]["color"] = "red"
-            G.edges[edge]["alpha"] = 1
-            G.edges[edge]["linewidth"] = 1 + uses  # Più usato = più spesso
-        else:
-            style_unvisited_edge(edge)
+def compare_graphs_overlay(place_name):
+    """Shows in red nodes/edges removed from original graph"""
+    import matplotlib.pyplot as plt
     
-    plot_graph()
+
+    G_original = ox.graph_from_place(place_name, network_type="drive")
+    G_truncated = ox.truncate.largest_component(G_original, strongly=True)
+    
+    removed_nodes = set(G_original.nodes) - set(G_truncated.nodes)
+    removed_edges = set(G_original.edges) - set(G_truncated.edges)
+    
+    print(f"Original:  {len(G_original.nodes)} nodes, {len(G_original.edges)} edges")
+    print(f"Truncated:   {len(G_truncated.nodes)} nodes, {len(G_truncated.edges)} edges")
+    print(f"Removed:    {len(removed_nodes)} nodes, {len(removed_edges)} edges")
+    
+    # Plot overlay
+    fig, ax = plt.subplots(figsize=(12, 12))
+    
+    # Original graph
+    ox.plot_graph(G_truncated, ax=ax, node_size=0, edge_color="gray",
+                  edge_linewidth=0.5, bgcolor="black", show=False)
+    
+    # Differenees (edge/node removed)
+    if removed_edges:
+        ox.plot_graph(G_original, ax=ax, node_size=0, 
+                      edge_color=["red" if e in removed_edges else "none" for e in G_original.edges],
+                      edge_linewidth=2, bgcolor="black", show=False)
+    
+    if removed_nodes:
+        node_colors = ["red" if n in removed_nodes else "none" for n in G_original.nodes]
+        node_sizes = [50 if n in removed_nodes else 0 for n in G_original.nodes]
+        ox.plot_graph(G_original, ax=ax, node_color=node_colors, node_size=node_sizes,
+                      edge_color="none", bgcolor="black", show=False)
+    
+    ax.set_title(f"Gray: connected | Red: removed ({len(removed_nodes)} nodes, {len(removed_edges)} edges)", 
+                 color="white")
+    fig.patch.set_facecolor("black")
+    plt.savefig(f"{place_name}_overlay.png", bbox_inches="tight", facecolor=fig.get_facecolor())
+
+#compare_graphs_overlay("Aosta, Aosta, Italy")
+
+
+if __name__ == "__main__":
+
+    places = ["Turin, Piedmont, Italy", "Aosta, Aosta, Italy"]
+    for place_name in places:
+        dijkstra_iterarions = []
+
+        G = ox.graph_from_place(place_name, network_type="drive")
+
+        ## Keep only the largest strongly connected component (the one where you can reach any node from any other)
+        G = ox.truncate.largest_component(G, strongly=True) 
+
+
+        graph_init()
+        for i in range(10):
+
+            start = random.choice(list(G.nodes))
+            end = random.choice(list(G.nodes))
+
+            print(f"Running Dijkstra from {start} to {end} in {place_name}...")
+            iterations = dijkstra(start, end)
+            dijkstra_iterarions.append(iterations)
+            print("Iterations:", iterations)
+            reconstruct_path(start, end, algorithm="dijkstra", plot=False)
+            print( "Done")
+
+        print(f"Average iterations for Dijkstra in {place_name}: {sum(dijkstra_iterarions) / len(dijkstra_iterarions)}")
+        print(f"Number of edges in {place_name}:", len(G.edges))
+        print(f"Number of nodes in {place_name}:", len(G.nodes))
+
+        ## graph visualization
+        for edge in G.edges:
+            uses = G.edges[edge].get("dijkstra_uses", 0)
+            if uses > 0:
+                G.edges[edge]["color"] = "red"
+                G.edges[edge]["alpha"] = 1
+                G.edges[edge]["linewidth"] = 1 + uses
+            else:
+                style_unvisited_edge(edge)
+    
+        plot_graph()
 
