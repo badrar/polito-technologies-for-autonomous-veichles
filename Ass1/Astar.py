@@ -126,7 +126,7 @@ def save_graph(path, title=None):
     fig.savefig(f"{path}.png", bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
-def a_star(orig, dest, heuristic, plot=False):
+def a_star(orig, dest, heuristic, scaling, plot=False):
     """A* algorithm implementation.
     Args:
         orig: Starting node.
@@ -173,7 +173,7 @@ def a_star(orig, dest, heuristic, plot=False):
                 heuristic_cost = heuristic(
                         (G.nodes[neighbor]['y'], G.nodes[neighbor]['x']), 
                         (G.nodes[dest]['y'], G.nodes[dest]['x'])
-                    )*1000/MAX_SPEED #SCALE HEURISTIC TO MAX SPEED TO AVOID OVERWEIGHTING
+                    )*scaling #SCALE HEURISTIC TO MAX SPEED TO AVOID OVERWEIGHTING
                 heapq.heappush(pq, (G.nodes[neighbor]["distance"] + heuristic_cost, neighbor))
                 for edge2 in G.out_edges(neighbor):
                     style_active_edge((edge2[0], edge2[1], 0))
@@ -299,7 +299,7 @@ def compare_graphs_overlay(place_name):
 
 
 if __name__ == "__main__":
-    heuristics = [euclidean_distance, manhattan_distance, haversine_distance]
+
     places = ["Turin, Piedmont, Italy", "Aosta, Aosta, Italy"]
     for place_name in places:
         astar_iterations = []
@@ -307,32 +307,44 @@ if __name__ == "__main__":
         G = ox.graph_from_place(place_name, network_type="drive")
 
         ## Keep only the largest strongly connected component (the one where you can reach any node from any other)
-        G = ox.truncate.largest_component(G, strongly=True) 
+        G = ox.truncate.largest_component(G, strongly=True)
+        graph_init()
+        MAX_SPEED = max(G.edges[edge]["maxspeed"] for edge in G.edges)
+
+        ## Fixes overweight of heuristic (necessary in order to make it admissible)
+        # 
+        avg_lat = math.radians(sum(G.nodes[n]['y'] for n in G.nodes) / len(G.nodes))
+        lon_scale = math.cos(avg_lat)
+
+        heuristics = [
+            (euclidean_distance, 111_000*lon_scale/MAX_SPEED), 
+            (manhattan_distance, 111_000*lon_scale/MAX_SPEED), 
+            (haversine_distance, 1_000/MAX_SPEED)]
 
         start_end_pairs = []
         for i in range(10):
             start = random.choice(list(G.nodes))
             end = random.choice(list(G.nodes))
             start_end_pairs.append((start, end))
+        
+        print(f"Number of edges in {place_name}:", len(G.edges))
+        print(f"Number of nodes in {place_name}:", len(G.nodes))
 
-        for heuristic in heuristics:
+        for heuristic, scaling in heuristics:
             graph_init()
             astar_iterations = []
-            MAX_SPEED = max(G.edges[edge]["maxspeed"] for edge in G.edges)
             for start, end in start_end_pairs:
 
                 #start = random.choice(list(G.nodes))
                 #end = random.choice(list(G.nodes))
 
                 #print(f"Running Astar from {start} to {end} in {place_name}...")
-                iterations = a_star(start, end, heuristic)
+                iterations = a_star(start, end, heuristic, scaling=scaling)
                 astar_iterations.append(iterations)
                 #print("Iterations:", iterations)
                 reconstruct_path(start, end, algorithm="astar", plot=False)
 
             print(f"[{heuristic.__name__}] Average iterations for A* in {place_name}: {sum(astar_iterations) / len(astar_iterations)}")
-            print(f"Number of edges in {place_name}:", len(G.edges))
-            print(f"Number of nodes in {place_name}:", len(G.nodes))
 
             ## graph visualization
             for edge in G.edges:

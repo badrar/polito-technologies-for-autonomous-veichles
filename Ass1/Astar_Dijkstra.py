@@ -126,12 +126,13 @@ def save_graph(path, title=None):
     fig.savefig(f"{path}.png", bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
-def a_star(orig, dest, heuristic, plot=False):
+def a_star(orig, dest, heuristic, scaling, plot=False):
     """A* algorithm implementation.
     Args:
         orig: Starting node.
         dest: Destination node.
         heuristic: G function that takes two points and returns an estimate of the cost to reach dest from the point.
+        scaling: A factor to scale the heuristic cost, to avoid overweighting it compared to the actual distance.
     Returns:
         Number of iterations taken to find the path, None if no path was found.
     """
@@ -173,7 +174,7 @@ def a_star(orig, dest, heuristic, plot=False):
                 heuristic_cost = heuristic(
                         (G.nodes[neighbor]['y'], G.nodes[neighbor]['x']), 
                         (G.nodes[dest]['y'], G.nodes[dest]['x'])
-                    )*1000/MAX_SPEED #SCALE HEURISTIC TO MAX SPEED TO AVOID OVERWEIGHTING
+                    )*scaling #SCALE HEURISTIC TO MAX SPEED TO AVOID OVERWEIGHTING
                 heapq.heappush(pq, (G.nodes[neighbor]["distance"] + heuristic_cost, neighbor))
                 for edge2 in G.out_edges(neighbor):
                     style_active_edge((edge2[0], edge2[1], 0))
@@ -299,7 +300,7 @@ def compare_graphs_overlay(place_name):
 #compare_graphs_overlay("Aosta, Aosta, Italy")
 
 
-def compute_dijkstra_routes(style_unvisited_edge, save_graph, dijkstra, reconstruct_path, graph_init, place_name, dijkstra_iterarions, G, start_end_pairs):
+def compute_dijkstra_routes(place_name, dijkstra_iterarions, G, start_end_pairs):
     graph_init()
     for start, end in start_end_pairs:
         print(f"Running Dijkstra from {start} to {end} in {place_name}...")
@@ -326,7 +327,6 @@ def compute_dijkstra_routes(style_unvisited_edge, save_graph, dijkstra, reconstr
     save_graph("dijkstra_" + place_name.replace(", ", "_").replace(" ", "_"), title=f"Dijkstra in {place_name}")
 
 if __name__ == "__main__":
-    heuristics = [euclidean_distance, manhattan_distance, haversine_distance]
     places = ["Turin, Piedmont, Italy", "Aosta, Aosta, Italy"]
 
     for place_name in places:
@@ -337,6 +337,7 @@ if __name__ == "__main__":
 
         ## Keep only the largest strongly connected component (the one where you can reach any node from any other)
         G = ox.truncate.largest_component(G, strongly=True) 
+        MAX_SPEED = max(G.edges[edge]["maxspeed"] for edge in G.edges)
 
         start_end_pairs = []
         for i in range(10):
@@ -344,19 +345,27 @@ if __name__ == "__main__":
             end = random.choice(list(G.nodes))
             start_end_pairs.append((start, end))
 
-        compute_dijkstra_routes(style_unvisited_edge, save_graph, dijkstra, reconstruct_path, graph_init, place_name, dijkstra_iterarions, G, start_end_pairs)
+        compute_dijkstra_routes(
+            place_name, 
+            dijkstra_iterarions, 
+            G, 
+            start_end_pairs)
+
+        heuristics = [
+            (euclidean_distance, 111_000/MAX_SPEED), 
+            (manhattan_distance, 111_000/MAX_SPEED), 
+            (haversine_distance, 1_000/MAX_SPEED)]
         
-        for heuristic in heuristics:
+        for heuristic, scaling in heuristics:
             astar_iterations = []
             graph_init()
-            MAX_SPEED = max(G.edges[edge]["maxspeed"] for edge in G.edges)
             for start, end in start_end_pairs:
 
                 #start = random.choice(list(G.nodes))
                 #end = random.choice(list(G.nodes))
 
                 #print(f"Running Astar from {start} to {end} in {place_name}...")
-                iterations = a_star(start, end, heuristic)
+                iterations = a_star(start, end, heuristic, scaling=scaling)
                 astar_iterations.append(iterations)
                 #print("Iterations:", iterations)
                 reconstruct_path(start, end, algorithm="astar", plot=False)
