@@ -167,7 +167,13 @@ def a_star(orig, dest, heuristic, plot=False):
             if G.nodes[neighbor]["distance"] > G.nodes[node]["distance"] + weight:
                 G.nodes[neighbor]["distance"] = G.nodes[node]["distance"] + weight
                 G.nodes[neighbor]["previous"] = node
-                heuristic_cost = heuristic((G.nodes[neighbor]['y'], G.nodes[neighbor]['x']), (G.nodes[dest]['y'], G.nodes[dest]['x']))
+                ###### NAIVE IMPLEMENTATION (WITHOUT PROPER HEURISTIC WEIGHT) ######
+                #heuristic_cost = heuristic((G.nodes[neighbor]['y'], G.nodes[neighbor]['x']), (G.nodes[dest]['y'], G.nodes[dest]['x']))
+                #heapq.heappush(pq, (G.nodes[neighbor]["distance"] + heuristic_cost, neighbor))
+                heuristic_cost = heuristic(
+                        (G.nodes[neighbor]['y'], G.nodes[neighbor]['x']), 
+                        (G.nodes[dest]['y'], G.nodes[dest]['x'])
+                    )*1000/MAX_SPEED #SCALE HEURISTIC TO MAX SPEED TO AVOID OVERWEIGHTING
                 heapq.heappush(pq, (G.nodes[neighbor]["distance"] + heuristic_cost, neighbor))
                 for edge2 in G.out_edges(neighbor):
                     style_active_edge((edge2[0], edge2[1], 0))
@@ -311,6 +317,8 @@ if __name__ == "__main__":
 
         for heuristic in heuristics:
             graph_init()
+            astar_iterations = []
+            MAX_SPEED = max(G.edges[edge]["maxspeed"] for edge in G.edges)
             for start, end in start_end_pairs:
 
                 #start = random.choice(list(G.nodes))
