@@ -110,7 +110,7 @@ def graph_init():
                     maxspeed = int(maxspeed)
         G.edges[edge]["maxspeed"] = maxspeed
     # Adding the "weight" attribute (time = distance / speed)
-        G.edges[edge]["weight"] = G.edges[edge]["length"] / maxspeed
+        G.edges[edge]["weight"] = G.edges[edge]["length"] / (maxspeed / 3.6)  # convert km/h to m/s
 
 
     for edge in G.edges:

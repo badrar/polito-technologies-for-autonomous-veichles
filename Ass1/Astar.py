@@ -1,4 +1,3 @@
-
 #The script loads a driving network from OpenStreetMap (using osmnx), sets each edge’s travel time as its 
 #weight (length / maxspeed), runs a Dijkstra shortest-path search (using heapq) between two randomly chosen nodes, 
 #styles edges/nodes for visualization while the algorithm runs, reconstructs the found path, increments an 
@@ -11,44 +10,43 @@ import heapq
 import math
 import matplotlib.pyplot as plt
 
-## TODO complete this file with implementation of A* starting from Dijkstra's implementation in Dijkstra.py.
-
-
-def manhattan_distance(point1, point2):
+def manhattan_distance(point1, point2, lon_scale=1):
     """Compute manhattan distance between two points.
-    
+
     Formula:
-        h(n) = |x_1 - x_2| + |y_1 - y_2|
+        h(n) = |x_1 - x_2| + |y_1 - y_2| * lon_scale
 
     Args:
-        point1: A tuple representing the coordinates of the first point (x1, y1).
-        point2: A tuple representing the coordinates of the second point (x2, y2).
+        point1: A tuple representing the coordinates of the first point (lat1, lon1).
+        point2: A tuple representing the coordinates of the second point (lat2, lon2).
+        lon_scale: Correction factor for longitude (cos(avg_lat)), default 1.
     Returns:
-        The euclidean distance between the two points.
+        The manhattan distance between the two points.
     """
-    x1, y1 = point1
-    x2, y2 = point2
-    return abs(x1 - x2) + abs(y1 - y2)
+    lat1, lon1 = point1
+    lat2, lon2 = point2
+    return abs(lat1 - lat2) + abs(lon1 - lon2) * lon_scale
 
 
-def euclidean_distance(point1, point2):
+def euclidean_distance(point1, point2, lon_scale=1):
     """Compute euclidean distance between two points.
 
     Formula:
-        d = sqrt((x_1 - x_2)^2 + (y_1 - y_2)^2)
+        d = sqrt((lat_1 - lat_2)^2 + ((lon_1 - lon_2) * lon_scale)^2)
 
     Args:
-        point1: A tuple representing the coordinates of the first point (x1, y1).
-        point2: A tuple representing the coordinates of the second point (x2, y2).
+        point1: A tuple representing the coordinates of the first point (lat1, lon1).
+        point2: A tuple representing the coordinates of the second point (lat2, lon2).
+        lon_scale: Correction factor for longitude (cos(avg_lat)), default 1.
     Returns:
         The euclidean distance between the two points.
     """
-    x1, y1 = point1
-    x2, y2 = point2
-    return math.sqrt(((x1 - x2) ** 2 + (y1 - y2) ** 2))
+    lat1, lon1 = point1
+    lat2, lon2 = point2
+    return math.sqrt((lat1 - lat2) ** 2 + ((lon1 - lon2) * lon_scale) ** 2)
 
 
-def haversine_distance(point1, point2):
+def haversine_distance(point1, point2, lon_scale=1):
     """Compute haversine distance between two points.
 
     Formula:
@@ -59,6 +57,7 @@ def haversine_distance(point1, point2):
     Args:
         point1: A tuple representing the coordinates of the first point (lat1, lon1).
         point2: A tuple representing the coordinates of the second point (lat2, lon2).
+        lon_scale: Unused, accepted for interface compatibility.
     Returns:
         The haversine distance between the two points in kilometers.
     """
@@ -126,12 +125,13 @@ def save_graph(path, title=None):
     fig.savefig(f"{path}.png", bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
-def a_star(orig, dest, heuristic, scaling, plot=False):
+def a_star(orig, dest, heuristic, scaling, lon_scale=1.0, plot=False):
     """A* algorithm implementation.
     Args:
         orig: Starting node.
         dest: Destination node.
         heuristic: G function that takes two points and returns an estimate of the cost to reach dest from the point.
+        scaling: A factor to scale the heuristic cost, to avoid overweighting it compared to the actual distance.
     Returns:
         Number of iterations taken to find the path, None if no path was found.
     """
@@ -171,8 +171,9 @@ def a_star(orig, dest, heuristic, scaling, plot=False):
                 #heuristic_cost = heuristic((G.nodes[neighbor]['y'], G.nodes[neighbor]['x']), (G.nodes[dest]['y'], G.nodes[dest]['x']))
                 #heapq.heappush(pq, (G.nodes[neighbor]["distance"] + heuristic_cost, neighbor))
                 heuristic_cost = heuristic(
-                        (G.nodes[neighbor]['y'], G.nodes[neighbor]['x']), 
-                        (G.nodes[dest]['y'], G.nodes[dest]['x'])
+                        (G.nodes[neighbor]['y'], G.nodes[neighbor]['x']),
+                        (G.nodes[dest]['y'], G.nodes[dest]['x']),
+                        lon_scale
                     )*scaling #SCALE HEURISTIC TO MAX SPEED TO AVOID OVERWEIGHTING
                 heapq.heappush(pq, (G.nodes[neighbor]["distance"] + heuristic_cost, neighbor))
                 for edge2 in G.out_edges(neighbor):
@@ -251,65 +252,97 @@ def graph_init():
                     maxspeed = int(maxspeed)
         G.edges[edge]["maxspeed"] = maxspeed
     # Adding the "weight" attribute (time = distance / speed)
-        G.edges[edge]["weight"] = G.edges[edge]["length"] / maxspeed
+        G.edges[edge]["weight"] = G.edges[edge]["length"] / (maxspeed / 3.6)
 
 
     for edge in G.edges:
         G.edges[edge]["astar_uses"] = 0
+        G.edges[edge]["dijkstra_uses"] = 0
 
-def compare_graphs_overlay(place_name):
-    """Shows in red nodes/edges removed from original graph"""
+
+# def compare_graphs_overlay(place_name):
+#     """Shows in red nodes/edges removed from original graph"""
     
 
-    G_original = ox.graph_from_place(place_name, network_type="drive")
-    G_truncated = ox.truncate.largest_component(G_original, strongly=True)
+#     G_original = ox.graph_from_place(place_name, network_type="drive")
+#     G_truncated = ox.truncate.largest_component(G_original, strongly=True)
     
-    removed_nodes = set(G_original.nodes) - set(G_truncated.nodes)
-    removed_edges = set(G_original.edges) - set(G_truncated.edges)
+#     removed_nodes = set(G_original.nodes) - set(G_truncated.nodes)
+#     removed_edges = set(G_original.edges) - set(G_truncated.edges)
     
-    print(f"Original:  {len(G_original.nodes)} nodes, {len(G_original.edges)} edges")
-    print(f"Truncated:   {len(G_truncated.nodes)} nodes, {len(G_truncated.edges)} edges")
-    print(f"Removed:    {len(removed_nodes)} nodes, {len(removed_edges)} edges")
+#     print(f"Original:  {len(G_original.nodes)} nodes, {len(G_original.edges)} edges")
+#     print(f"Truncated:   {len(G_truncated.nodes)} nodes, {len(G_truncated.edges)} edges")
+#     print(f"Removed:    {len(removed_nodes)} nodes, {len(removed_edges)} edges")
     
-    # Plot overlay
-    fig, ax = plt.subplots(figsize=(12, 12))
+#     # Plot overlay
+#     fig, ax = plt.subplots(figsize=(12, 12))
     
-    # Original graph
-    ox.plot_graph(G_truncated, ax=ax, node_size=0, edge_color="gray",
-                  edge_linewidth=0.5, bgcolor="black", show=False)
+#     # Original graph
+#     ox.plot_graph(G_truncated, ax=ax, node_size=0, edge_color="gray",
+#                   edge_linewidth=0.5, bgcolor="black", show=False)
     
-    # Differenees (edge/node removed)
-    if removed_edges:
-        ox.plot_graph(G_original, ax=ax, node_size=0, 
-                      edge_color=["red" if e in removed_edges else "none" for e in G_original.edges],
-                      edge_linewidth=2, bgcolor="black", show=False)
+#     # Differenees (edge/node removed)
+#     if removed_edges:
+#         ox.plot_graph(G_original, ax=ax, node_size=0, 
+#                       edge_color=["red" if e in removed_edges else "none" for e in G_original.edges],
+#                       edge_linewidth=2, bgcolor="black", show=False)
     
-    if removed_nodes:
-        node_colors = ["red" if n in removed_nodes else "none" for n in G_original.nodes]
-        node_sizes = [50 if n in removed_nodes else 0 for n in G_original.nodes]
-        ox.plot_graph(G_original, ax=ax, node_color=node_colors, node_size=node_sizes,
-                      edge_color="none", bgcolor="black", show=False)
+#     if removed_nodes:
+#         node_colors = ["red" if n in removed_nodes else "none" for n in G_original.nodes]
+#         node_sizes = [50 if n in removed_nodes else 0 for n in G_original.nodes]
+#         ox.plot_graph(G_original, ax=ax, node_color=node_colors, node_size=node_sizes,
+#                       edge_color="none", bgcolor="black", show=False)
     
-    ax.set_title(f"Gray: connected | Red: removed ({len(removed_nodes)} nodes, {len(removed_edges)} edges)", 
-                 color="white")
-    fig.patch.set_facecolor("black")
-    plt.savefig(f"{place_name}_overlay.png", bbox_inches="tight", facecolor=fig.get_facecolor())
+#     ax.set_title(f"Gray: connected | Red: removed ({len(removed_nodes)} nodes, {len(removed_edges)} edges)", 
+#                  color="white")
+#     fig.patch.set_facecolor("black")
+#     plt.savefig(f"{place_name}_overlay.png", bbox_inches="tight", facecolor=fig.get_facecolor())
+
+    
 
 #compare_graphs_overlay("Aosta, Aosta, Italy")
 
 
-if __name__ == "__main__":
+def compute_dijkstra_routes(place_name, dijkstra_iterarions, G, start_end_pairs):
+    graph_init()
+    for start, end in start_end_pairs:
+        iterations = dijkstra(start, end)
+        dijkstra_iterarions.append(iterations)
+        reconstruct_path(start, end, algorithm="dijkstra", plot=False)
 
+    print(f"[Dijkstra] Average iterations: {sum(dijkstra_iterarions) / len(dijkstra_iterarions)}")
+
+        ## graph visualization
+    for edge in G.edges:
+        uses = G.edges[edge].get("dijkstra_uses", 0)
+        if uses > 0:
+            G.edges[edge]["color"] = "red"
+            G.edges[edge]["alpha"] = 1
+            G.edges[edge]["linewidth"] = 1 + uses
+        else:
+            style_unvisited_edge(edge)
+
+    #save_graph("dijkstra_" + place_name.replace(", ", "_").replace(" ", "_"), title=f"Dijkstra in {place_name}")
+
+if __name__ == "__main__":
+    import osmnx as ox
     places = ["Turin, Piedmont, Italy", "Aosta, Aosta, Italy"]
+
     for place_name in places:
         astar_iterations = []
+        dijkstra_iterarions = []
 
         G = ox.graph_from_place(place_name, network_type="drive")
 
         ## Keep only the largest strongly connected component (the one where you can reach any node from any other)
-        G = ox.truncate.largest_component(G, strongly=True)
+        G = ox.truncate.largest_component(G, strongly=True) 
         graph_init()
-        MAX_SPEED = max(G.edges[edge]["maxspeed"] for edge in G.edges)
+        MAX_SPEED = max(G.edges[edge]["maxspeed"] for edge in G.edges) / 3.6  # m/s
+
+        print("-"*60)
+        print(place_name)
+        print(f"Edges: {len(G.edges)} Nodes: {len(G.nodes)}")
+        print("-"*60)
 
         ## Fixes overweight of heuristic (necessary in order to make it admissible)
         # 
@@ -317,44 +350,42 @@ if __name__ == "__main__":
         lon_scale = math.cos(avg_lat)
 
         heuristics = [
-            (euclidean_distance, 111_000*lon_scale/MAX_SPEED), 
-            (manhattan_distance, 111_000*lon_scale/MAX_SPEED), 
-            (haversine_distance, 1_000/MAX_SPEED)]
-
+            (euclidean_distance, [1, 111_320/MAX_SPEED]),
+            (manhattan_distance, [1, 111_320/MAX_SPEED]),
+            (haversine_distance, [1_000/MAX_SPEED])]
+        
         start_end_pairs = []
         for i in range(10):
             start = random.choice(list(G.nodes))
             end = random.choice(list(G.nodes))
             start_end_pairs.append((start, end))
-        
-        print(f"Number of edges in {place_name}:", len(G.edges))
-        print(f"Number of nodes in {place_name}:", len(G.nodes))
 
+        compute_dijkstra_routes(
+            place_name, 
+            dijkstra_iterarions, 
+            G, 
+            start_end_pairs)
+        
         for heuristic, scaling in heuristics:
-            graph_init()
-            astar_iterations = []
-            for start, end in start_end_pairs:
+            for scale in scaling:
+                astar_iterations = []
+                graph_init()
+                for start, end in start_end_pairs:
 
-                #start = random.choice(list(G.nodes))
-                #end = random.choice(list(G.nodes))
+                    iterations = a_star(start, end, heuristic, scaling=scale, lon_scale=lon_scale)
+                    astar_iterations.append(iterations)
 
-                #print(f"Running Astar from {start} to {end} in {place_name}...")
-                iterations = a_star(start, end, heuristic, scaling=scaling)
-                astar_iterations.append(iterations)
-                #print("Iterations:", iterations)
-                reconstruct_path(start, end, algorithm="astar", plot=False)
+                    reconstruct_path(start, end, algorithm="astar", plot=False)
 
-            print(f"[{heuristic.__name__}] Average iterations for A* in {place_name}: {sum(astar_iterations) / len(astar_iterations)}")
+                print(f"[{heuristic.__name__} - {scale:.2f}] {sum(astar_iterations) / len(astar_iterations)}")
 
-            ## graph visualization
-            for edge in G.edges:
-                uses = G.edges[edge].get("astar_uses", 0)
-                if uses > 0:
-                    G.edges[edge]["color"] = "red"
-                    G.edges[edge]["alpha"] = 1
-                    G.edges[edge]["linewidth"] = 1 + uses
-                else:
-                    style_unvisited_edge(edge)
-        
-            save_graph(heuristic.__name__ + "_" + place_name.replace(", ", "_").replace(" ", "_"), title=f"A* with {heuristic.__name__} heuristic in {place_name}")
+                ## graph visualization
+                for edge in G.edges:
+                    uses = G.edges[edge].get("astar_uses", 0)
+                    if uses > 0:
+                        G.edges[edge]["color"] = "red"
+                        G.edges[edge]["alpha"] = 1
+                        G.edges[edge]["linewidth"] = 1 + uses
+                    else:
+                        style_unvisited_edge(edge)
 

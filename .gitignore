@@ -4,6 +4,9 @@
 #ignore cache folders
 cache/
 
+#ignore folder for generated files
+ignore/
+
 ### CUDA ###
 *.i
 *.ii
