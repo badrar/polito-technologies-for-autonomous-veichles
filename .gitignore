@@ -3,6 +3,9 @@
 
 #ignore cache folders
 cache/
+dataset/
+archive/
+*.DS_Store
 
 #ignore folder for generated files
 ignore/
@@ -330,3 +333,4 @@ pip-selfcheck.json
 # Ignore all local history of files
 .history
 .ionide
+.DS_Store
