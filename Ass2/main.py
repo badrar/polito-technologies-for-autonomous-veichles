@@ -194,14 +194,20 @@ if __name__ == "__main__":
         H_bev_to_img = compute_homography_bev_to_img()
         warped_image = compute_bev(warped_image, H_bev_to_img)
 
+        ######################! STANDARD DISPLAY #####################
+
         # Display original
         cv2.putText(frame, f"Image ID: {id}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         cv2.imshow("Frame - q to exit", frame)
 
-        # Display BEV
+        ######################! BEV DISPLAY #####################
+
         bev_image = warped_image.copy()
         cv2.putText(bev_image, f"BEV - Image ID: {id}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
         cv2.imshow("BEV - q to exit", bev_image)
+
+        ######################! LANE MANAGEMENT DISPLAY #####################
+
 
         # Percentile threshold with interactive slider
         gray_bev = cv2.cvtColor(warped_image, cv2.COLOR_BGR2GRAY)
@@ -235,14 +241,14 @@ if __name__ == "__main__":
 
         # find peaks in y_values (local maxima)
         from scipy.signal import find_peaks
-        peaks, _ = find_peaks(y_values)  # picchi sopra metà soglia
+        peaks, _ = find_peaks(y_values)  # > 50%
 
 
         print(f"Y values: mean={y_values.mean():.2f}, std={y_values.std():.2f}, max={y_values.max():.2f}")
         # Tieni solo i picchi significativi (sopra media + 1 std)
         y_values = np.where(y_values > 0.5, y_values, 0)
 
-        # Istogramma colonne come overlay
+        #? Istogramma colonne come overlay
         overlay = cv2.cvtColor(pct_mask, cv2.COLOR_GRAY2BGR)
         h_img = overlay.shape[0]
         max_val = max(y_values.max(), 1)
