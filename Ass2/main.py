@@ -2,6 +2,8 @@ import os
 import cv2
 import numpy as np
 
+DEBUG = True
+
 # Intrinsic camera parameters 
 FOCAL_LENGTH = (1970.0, 1970.0)        # fx, fy in pixels
 PRINCIPAL_POINT = (970.0, 483.0)       # cx, cy in pixels
@@ -11,6 +13,7 @@ PITCH = 0.0                           # degrees
  
 # lane column thresholding
 SUM_THRESHOLD = 1000  # minimum sum of pixel values in a column to consider it as lane marking
+PEAK_MIN_DISTANCE = 30  # minimum pixel distance between peaks for NMS
 
 # BEV configuration SAFE PARAMS
 # BEV_WIDTH = 300                        # pixels
@@ -138,13 +141,6 @@ def binarize(img_gray: np.ndarray, th: float) -> np.ndarray:
 
 
 if __name__ == "__main__":
-    # print("Camera Parameters:")
-    # print(f"Image Size: {image_size}")
-    # print(f"Principal Point: {principal_point}")
-    # print(f"Focal Length: {focal_length}")
-    # print(f"Camera Position: {CAMERA.position}")
-    # print(f"Camera Rotation (Pitch): {pitch} degrees")
-
     video_id="044"
     #video_id="043"
     datset_path = f"./archive/{video_id}/camera/front_camera/"
@@ -256,14 +252,35 @@ if __name__ == "__main__":
         dark = overlay.copy()
         dark[:] = (0, 0, 0)
         overlay = cv2.addWeighted(overlay, 0.5, dark, 0.5, 0)
+
+        # non maximum suppression: disegna solo i picchi in un certo raggio (es. 30 pixel) per evitare sovrapposizioni
+        peaks_by_value = sorted(peaks, key=lambda p: y_values[p], reverse=True)
+        nms_peaks = []
+        for p in peaks_by_value:
+            if y_values[p] > 0 and all(abs(p - k) >= PEAK_MIN_DISTANCE for k in nms_peaks):
+                nms_peaks.append(p)
+        for p in nms_peaks:
+            cv2.line(overlay, (p, 0), (p, h_img), (0, 255, 0), 1)
+
+
         for x in range(len(y_values)):
-            if(x in peaks):
+            if(x in nms_peaks):
                 bar_h = int(y_values[x] / max_val * h_img)
                 cv2.line(overlay, (x, h_img), (x, h_img - bar_h), (0, 255, 0), 1)
 
         cv2.putText(overlay, f"Percentile={pct} th={th_pct:.0f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
         cv2.imshow("Percentile BEV - q to exit", overlay)
 
+        if DEBUG:
+            print(f"[INFO] Peaks found at columns: {peaks}")
+            for x in nms_peaks:
+                pct_mask[:, x] = np.uint8(255)
+
+        # Riproietta maschera BEV → immagine originale
+        lane_on_img = cv2.warpPerspective(pct_mask, H_bev_to_img, (frame.shape[1], frame.shape[0]))
+        result = frame.copy()
+        result[lane_on_img > 0] = (0, 255, 0)
+        cv2.imshow("Lane Overlay - q to exit", result)
 
         if cv2.waitKey(300) & 0xFF == ord('q'):
             break
