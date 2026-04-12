@@ -277,6 +277,46 @@ def find_lane_seeds(binary_bev, margin_ratio=0.15, min_peak_distance=40, n_lanes
     seeds = sorted(peaks[order[:n_lanes]].tolist())
     return seeds, hist
 
+def find_lane_seeds_improved(binary_bev, margin_ratio=0.15, min_peak_distance=40,
+                    n_lanes=2, max_marking_width=15):
+    h, w = binary_bev.shape
+    margin = int(w * margin_ratio)
+
+    roi = binary_bev[h // 2:, margin:w - margin]
+
+    # Per ogni colonna conta in quante RIGHE c'è almeno un pixel bianco,
+    # ma solo se il run orizzontale in quella riga è stretto (≤ max_marking_width).
+    # Questo elimina i picchi da oggetti larghi.
+    row_count = np.zeros(roi.shape[1], dtype=np.float64)
+    for y in range(roi.shape[0]):
+        row = roi[y]
+        in_run = False
+        start = 0
+        for x in range(len(row)):
+            if row[x] > 0 and not in_run:
+                start = x
+                in_run = True
+            elif (row[x] == 0 or x == len(row) - 1) and in_run:
+                end = x if row[x] == 0 else x + 1
+                if (end - start) <= max_marking_width:
+                    row_count[start:end] += 1
+                in_run = False
+
+    hist = np.zeros(w, dtype=np.float64)
+    hist[margin:w - margin] = row_count
+
+    if hist.max() == 0:
+        return [], hist
+
+    peaks, props = find_peaks(hist, distance=min_peak_distance,
+                              height=hist.max() * 0.10)
+    if len(peaks) == 0:
+        return [], hist
+
+    order = np.argsort(props['peak_heights'])[::-1]
+    seeds = sorted(peaks[order[:n_lanes]].tolist())
+    return seeds, hist
+
 def fit_lane_from_seed(binary_bev, seed, strip_half_width=30, deg=1, min_points=10):
     """
     Collect all white pixels inside a vertical strip centred on `seed` and
@@ -429,7 +469,7 @@ def enhance_lanes(image):
     return enhanced_img
 
 if __name__ == "__main__":
-    video_id="005"
+    video_id="008"
     #video_id="043"
     datset_path = f"./archive/{video_id}/camera/front_camera/"
 
@@ -553,10 +593,26 @@ if __name__ == "__main__":
             w_histogram_filtered[w] = w_histogram.get(w-1, 0) + w_histogram[w] + w_histogram.get(w+1, 0)
 
         # ── Step 5: column-projection histogram → lane seeds (GOLD Sec. 4.A) ──
-        seeds, hist = find_lane_seeds(binary,
+        seeds, hist = find_lane_seeds_improved(binary,
                                       margin_ratio=0.15,
                                       min_peak_distance=PEAK_MIN_DISTANCE,
                                       n_lanes=2)
+
+        ### ? impelemntazione per riconoscimento corsia dx o sx
+        mid = binary.shape[1] // 2
+
+        left  = [s for s in seeds if s < mid]
+        right = [s for s in seeds if s >= mid]
+
+        # Prendi il più forte per lato
+        left_seed  = left[-1]  if left  else None   # più vicino al centro
+        right_seed = right[0]  if right else None   # più vicino al centro
+
+        seeds = []
+        if left_seed is not None:
+            seeds.append(left_seed)
+        if right_seed is not None:
+            seeds.append(right_seed)
 
         # ── Step 6: strip pixel collection + polynomial fit (deg=1 = straight road) ──
         fits = [fit_lane_from_seed(binary, s, strip_half_width=25, deg=1)
