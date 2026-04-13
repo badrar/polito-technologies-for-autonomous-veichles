@@ -547,6 +547,12 @@ if __name__ == "__main__":
         kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_v)
 
+        # Crosswalk removal
+        margin = int(binary.shape[1] * 0.2)
+        active = binary[:, margin:-margin]
+        row_density = np.count_nonzero(active, axis=1) / active.shape[1]
+        binary[row_density > 0.10] = 0
+
         # Connected component filtering: tieni solo blob verticali e abbastanza grandi
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         min_area = 20
@@ -591,6 +597,7 @@ if __name__ == "__main__":
         w_histogram_filtered = {}
         for w in w_histogram:
             w_histogram_filtered[w] = w_histogram.get(w-1, 0) + w_histogram[w] + w_histogram.get(w+1, 0)
+
 
         # ── Step 5: column-projection histogram → lane seeds (GOLD Sec. 4.A) ──
         seeds, hist = find_lane_seeds_improved(binary,
