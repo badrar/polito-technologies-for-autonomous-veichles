@@ -468,6 +468,22 @@ def enhance_lanes(image):
     
     return enhanced_img
 
+def classify_lane(binary_bev, seed_x, band=10, gap_threshold=0.5):
+    """
+    Classify a lane as 'solid' or 'dashed' based on the presence 
+    of pixels in a vertical band around the seed.
+    """
+    _, w = binary_bev.shape
+    x_lo = max(0, seed_x - band)
+    x_hi = min(w, seed_x + band)
+
+    # Per ogni riga: c'è almeno un pixel acceso nella banda?
+    presence = np.any(binary_bev[:, x_lo:x_hi] > 0, axis=1).astype(np.float64)
+
+    coverage = presence.mean()
+
+    return 'solid' if coverage > gap_threshold else 'dashed'
+
 if __name__ == "__main__":
     video_id="008"
     #video_id="043"
@@ -614,6 +630,13 @@ if __name__ == "__main__":
         # Prendi il più forte per lato
         left_seed  = left[-1]  if left  else None   # più vicino al centro
         right_seed = right[0]  if right else None   # più vicino al centro
+
+        if left_seed is not None:
+            lane_type = classify_lane(binary, left_seed)
+            print(f"Left lane seed at x={left_seed} classified as {lane_type}")
+        if right_seed is not None:
+            lane_type = classify_lane(binary, right_seed)
+            print(f"Right lane seed at x={right_seed} classified as {lane_type}")
 
         seeds = []
         if left_seed is not None:
