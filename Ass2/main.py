@@ -340,47 +340,45 @@ def fit_lane_from_seed(binary_bev, seed, strip_half_width=30, deg=1, min_points=
     except np.linalg.LinAlgError:
         return None
 
-def draw_lanes_on_bev(bev_bgr, fits, colors=None):
-    """Draw polynomial lane curves on a colour BEV image."""
-    if colors is None:
-        colors = [(0, 255, 255), (255, 100, 0)]
-    h, result = bev_bgr.shape[0], bev_bgr.copy()
-    y_rng = np.arange(h, dtype=np.float32)
-    for i, fit in enumerate(fits):
-        if fit is None:
-            continue
-        x_vals = np.polyval(fit, y_rng).astype(int)
-        pts = np.array([(x, y) for y, x in zip(y_rng.astype(int), x_vals)
-                        if 0 <= x < result.shape[1]], dtype=np.int32)
-        if len(pts) > 1:
-            cv2.polylines(result, [pts.reshape(-1, 1, 2)], False,
-                          colors[i % len(colors)], 3)
-    return result
+def lane_segments(fit, bev_h, lane_type, n_dashes=6, duty=0.6):
+    """Return a list of BEV endpoint pairs for a straight lane fit.
 
-def reproject_lanes_to_frame(frame, fits, H_bev_to_img, bev_shape, colors=None):
-    """Reproject fitted BEV lane curves to the original camera frame."""
-    if colors is None:
-        colors = [(0, 255, 255), (255, 100, 0)]
-    bev_h, bev_w = bev_shape
-    ih, iw = frame.shape[:2]
-    result = frame.copy()
-    y_rng  = np.arange(bev_h, dtype=np.float32)
-    for i, fit in enumerate(fits):
-        if fit is None:
-            continue
-        x_vals  = np.polyval(fit, y_rng)
-        valid   = (x_vals >= 0) & (x_vals < bev_w)
-        pts_bev = np.column_stack([x_vals[valid], y_rng[valid]]) \
-                    .reshape(-1, 1, 2).astype(np.float32)
-        if pts_bev.shape[0] < 2:
-            continue
-        pts_img  = cv2.perspectiveTransform(pts_bev, H_bev_to_img).astype(np.int32)
-        in_frame = ((pts_img[:, 0, 0] >= 0) & (pts_img[:, 0, 0] < iw) &
-                    (pts_img[:, 0, 1] >= 0) & (pts_img[:, 0, 1] < ih))
-        pts_img  = pts_img[in_frame]
-        if len(pts_img) > 1:
-            cv2.polylines(result, [pts_img], False, colors[i % len(colors)], 4)
-    return result
+    solid  -> one segment spanning the full image height.
+    dashed -> n_dashes segments, each covering `duty` fraction of its period.
+    """
+    if fit is None:
+        return []
+    H = bev_h - 1
+    if lane_type == 'solid':
+        ts = [(0.0, 1.0)]
+    else:
+        ts = [(k / n_dashes, (k + duty) / n_dashes) for k in range(n_dashes)]
+    segs = []
+    for t0, t1 in ts:
+        y0, y1 = t0 * H, t1 * H
+        x0 = float(np.polyval(fit, y0))
+        x1 = float(np.polyval(fit, y1))
+        segs.append(((x0, y0), (x1, y1)))
+    return segs
+
+
+def draw_lane_bev(img, fit, lane_type, color, thickness=3):
+    """Draw a single lane (solid or dashed) on the BEV image."""
+    for (p0, p1) in lane_segments(fit, img.shape[0], lane_type):
+        cv2.line(img, (int(p0[0]), int(p0[1])),
+                      (int(p1[0]), int(p1[1])), color, thickness)
+
+
+def draw_lane_frame(img, fit, lane_type, H_bev_to_img, bev_h,
+                    color, thickness=4):
+    """Draw a single lane on the original frame by reprojecting BEV segments."""
+    segs = lane_segments(fit, bev_h, lane_type)
+    if not segs:
+        return
+    pts = np.float32([p for seg in segs for p in seg]).reshape(-1, 1, 2)
+    proj = cv2.perspectiveTransform(pts, H_bev_to_img).reshape(-1, 2).astype(int)
+    for k in range(0, len(proj), 2):
+        cv2.line(img, tuple(proj[k]), tuple(proj[k + 1]), color, thickness)
 
 def calcola_soglia_iterativa(immagine):
     """
@@ -523,7 +521,7 @@ if __name__ == "__main__":
 
     while True:
         ret, (frame, id) = image_sequence.read(loop=True)
-        if not ret:
+        if not ret or frame is None:
             break
 
         warped_image = frame
@@ -631,38 +629,37 @@ if __name__ == "__main__":
         left_seed  = left[-1]  if left  else None   # più vicino al centro
         right_seed = right[0]  if right else None   # più vicino al centro
 
-        if left_seed is not None:
-            lane_type = classify_lane(binary, left_seed)
-            print(f"Left lane seed at x={left_seed} classified as {lane_type}")
-        if right_seed is not None:
-            lane_type = classify_lane(binary, right_seed)
-            print(f"Right lane seed at x={right_seed} classified as {lane_type}")
+        # ── Per-lane processing: fit + classify solid/dashed, one side at a time ──
+        lanes = []   # list of (seed, fit, type, color) for the sides actually detected
+        lane_marking_colour = (0, 255, 0)
+        for side, seed in (('left', left_seed), ('right', right_seed)):
+            if seed is None:
+                continue
+            fit = fit_lane_from_seed(binary, seed, strip_half_width=25, deg=1)
+            if fit is None:
+                continue
+            lane_type = classify_lane(binary, seed)
+            print(f"{side.capitalize()} lane seed at x={seed} classified as {lane_type}")
+            lanes.append((seed, fit, lane_type, lane_marking_colour))
 
-        seeds = []
-        if left_seed is not None:
-            seeds.append(left_seed)
-        if right_seed is not None:
-            seeds.append(right_seed)
-
-        # ── Step 6: strip pixel collection + polynomial fit (deg=1 = straight road) ──
-        fits = [fit_lane_from_seed(binary, s, strip_half_width=25, deg=1)
-                for s in seeds]
-
-        # ── Step 7: draw fitted curves on BEV with histogram overlay ──
-        bev_lanes = draw_lanes_on_bev(
-            cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR), fits)
+        # ── Step 7: draw each lane on BEV with histogram overlay ──
+        bev_lanes = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        for _, fit, lane_type, color in lanes:
+            draw_lane_bev(bev_lanes, fit, lane_type, color, thickness=3)
         h_bev, max_hist = bev_lanes.shape[0], max(hist.max(), 1.0)
         for x_col in range(len(hist)):
             bar = int(hist[x_col] / max_hist * (h_bev // 4))
             if bar > 0:
                 cv2.line(bev_lanes, (x_col, h_bev), (x_col, h_bev - bar), (0, 180, 0), 1)
-        for s in seeds:
-            cv2.line(bev_lanes, (s, 0), (s, h_bev), (0, 0, 255), 1)
+        for seed, _, _, _ in lanes:
+            cv2.line(bev_lanes, (seed, 0), (seed, h_bev), (0, 0, 255), 1)
         cv2.imshow("BEV lanes", bev_lanes)
 
-        # ── Step 8: reproject lanes onto original camera frame ──
-        final = reproject_lanes_to_frame(frame, fits, H_bev_to_img,
-                                         (BEV_HEIGHT, BEV_WIDTH))
+        # ── Step 8: reproject each lane onto original camera frame ──
+        final = frame.copy()
+        for _, fit, lane_type, color in lanes:
+            draw_lane_frame(final, fit, lane_type, H_bev_to_img,
+                            BEV_HEIGHT, color, thickness=4)
         
         #show masked image over original frame
         color_mask_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
