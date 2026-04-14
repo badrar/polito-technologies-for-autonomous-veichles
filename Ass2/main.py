@@ -4,7 +4,7 @@ import numpy as np
 from scipy.signal import find_peaks
 from lane_detection import calculate_threshold
 
-DEBUG = True
+
 
 # Intrinsic camera parameters 
 FOCAL_LENGTH = (1970.0, 1970.0)        # fx, fy in pixels
@@ -12,10 +12,6 @@ PRINCIPAL_POINT = (970.0, 483.0)       # cx, cy in pixels
 CAMERA_HEIGHT = 1.66                   # meters above ground
 CAMERA_X_OFFSET = 1.875               # meters forward offset
 PITCH = 0.0                           # degrees
- 
-# lane column thresholding
-SUM_THRESHOLD = 1000  # minimum sum of pixel values in a column to consider it as lane marking
-PEAK_MIN_DISTANCE = 30  # minimum pixel distance between peaks for NMS
 
 # BEV configuration TEST PARAMS
 BEV_WIDTH = 600                        # pixels
@@ -25,6 +21,8 @@ X_MAX = 30.0                           # farthest ground distance (meters)
 Y_MIN = -8.0                           # right boundary (meters)
 Y_MAX = 8.0                            # left boundary (meters)
 
+# lane column thresholding
+PEAK_MIN_DISTANCE = 30  # minimum pixel distance between peaks for NMS
  
 # ═══════════════════════════════════════════════════════════════════════════════
 # IPM - Inverse Perspective Mapping
@@ -325,12 +323,17 @@ def fit_lane_from_seed(binary_bev, seed, strip_half_width=30, deg=1, min_points=
     deg=1  -> straight road (motorway default)
     deg=2  -> curved road
     """
-    _, w = binary_bev.shape
+    h, w = binary_bev.shape
     x_lo = max(0, seed - strip_half_width)
     x_hi = min(w, seed + strip_half_width)
 
     ys_rel, xs_rel = np.nonzero(binary_bev[:, x_lo:x_hi])
     if len(ys_rel) < min_points:
+        return None
+
+    # Quante righe distinte hanno pixel? Se troppo poche, è rumore
+    row_coverage = len(np.unique(ys_rel)) / h
+    if row_coverage < 0.20:  # meno del 15% delle righe ha pixel → probabilmente rumore
         return None
 
     ys = ys_rel.astype(np.float32)
@@ -483,7 +486,10 @@ def classify_lane(binary_bev, seed_x, band=10, gap_threshold=0.5):
     return 'solid' if coverage > gap_threshold else 'dashed'
 
 if __name__ == "__main__":
-    video_id="008"
+    video_id="044" #base test
+    #video_id="008" #continua e non
+    #video_id="019" #leggera curva
+    #video_id="029"
     #video_id="043"
     datset_path = f"./archive/{video_id}/camera/front_camera/"
 
@@ -514,8 +520,6 @@ if __name__ == "__main__":
                     return self.read(loop)
                 else:
                     return True, (None, 0)
-
-            
 
     image_sequence = ImageSequence(datset_path)
 
@@ -570,7 +574,7 @@ if __name__ == "__main__":
         # Connected component filtering: tieni solo blob verticali e abbastanza grandi
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         min_area = 20
-        min_aspect = 2.0  # altezza/larghezza >= 2 → struttura verticale
+        min_aspect = 2.0  # altezza/larghezza >= 2 -> struttura verticale
 
         filtered = np.zeros_like(binary)
         for lab in range(1, num_labels):
@@ -587,7 +591,7 @@ if __name__ == "__main__":
         # Connected component filtering: tieni solo blob verticali e abbastanza grandi
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         min_area = 50
-        min_aspect = 2.0  # altezza/larghezza >= 2 → struttura verticale
+        min_aspect = 2.0  # altezza/larghezza >= 2 -> struttura verticale
 
         filtered = np.zeros_like(binary)
         for lab in range(1, num_labels):
@@ -657,6 +661,10 @@ if __name__ == "__main__":
 
         # ── Step 8: reproject each lane onto original camera frame ──
         final = frame.copy()
+        if not lanes:
+            # show no lanes detected message on the frame center
+            cv2.putText(final, "No lanes detected", (final.shape[1] // 2 - 100, final.shape[0] // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         for _, fit, lane_type, color in lanes:
             draw_lane_frame(final, fit, lane_type, H_bev_to_img,
                             BEV_HEIGHT, color, thickness=4)
