@@ -4,6 +4,29 @@ import numpy as np
 from scipy.signal import find_peaks
 from lane_detection import calculate_threshold
 
+from collections import deque
+
+DEBUG = True
+
+# frame buffer for temporal consistency in lane seed tracking
+# this is implemented to avoid high variance in high noise frames, 
+#   by keeping a history of recent seeds and checking if the current
+#   seed is consistent with the recent history. If a seed deviates too 
+#   much from the average of the history, it can be considered a false
+#   positive and ignored. Additionally, if no seeds are detected for 
+#   several consecutive frames, we can declare that no lanes are 
+#   detected, which can help to avoid false positives in frames where 
+#   the lane markings are not visible.
+
+HISTORY_LEN = 6          # quanti frame tenere
+MAX_DEVIATION = 5       # pixel: se il seed attuale dista più di così dalla media, è sospetto
+MAX_LOST_FRAMES = 4     # dopo tot frame senza detection → "no lanes detected"
+MAX_SLOPE_DEVIATION = 0.10  # per la coerenza della pendenza del fit (es. 0.15 per strade quasi dritte)
+
+left_history  = deque(maxlen=HISTORY_LEN)
+right_history = deque(maxlen=HISTORY_LEN)
+left_lost  = 0
+right_lost = 0
 
 
 # Intrinsic camera parameters 
@@ -329,19 +352,33 @@ def fit_lane_from_seed(binary_bev, seed, strip_half_width=30, deg=1, min_points=
 
     ys_rel, xs_rel = np.nonzero(binary_bev[:, x_lo:x_hi])
     if len(ys_rel) < min_points:
+        if DEBUG: print(f"Seed {seed}: not enough points ({len(ys_rel)}) for fitting.")
         return None
 
     # Quante righe distinte hanno pixel? Se troppo poche, è rumore
     row_coverage = len(np.unique(ys_rel)) / h
-    if row_coverage < 0.20:  # meno del 15% delle righe ha pixel → probabilmente rumore
+    if row_coverage < 0.15:  # meno del 15% delle righe ha pixel → probabilmente rumore
+        if DEBUG: print(f"Seed {seed}: low row coverage ({row_coverage:.2f}), likely noise.")
         return None
 
-    ys = ys_rel.astype(np.float32)
+    # Dopo il check row_coverage, prima del polyfit
     xs = (xs_rel + x_lo).astype(np.float32)
+    ys = ys_rel.astype(np.float32)
+
+    # Fit e poi controlla il residuo
     try:
-        return np.polyfit(ys, xs, deg)
+        fit = np.polyfit(ys, xs, deg)
     except np.linalg.LinAlgError:
+        if DEBUG: print(f"Seed {seed}: polyfit failed, likely degenerate points.")
         return None
+
+    residuals = xs - np.polyval(fit, ys)
+    rmse = np.sqrt(np.mean(residuals ** 2))
+    if rmse > 3:  # pixel — una lane vera ha residuo bassissimo --> 6 andava bene per il dastaset borderline
+        if DEBUG: print(f"Seed {seed}: high RMSE ({rmse:.2f}), likely bad fit.")
+        return None
+
+    return fit
 
 def lane_segments(fit, bev_h, lane_type, n_dashes=6, duty=0.6):
     """Return a list of BEV endpoint pairs for a straight lane fit.
@@ -486,9 +523,10 @@ def classify_lane(binary_bev, seed_x, band=10, gap_threshold=0.5):
     return 'solid' if coverage > gap_threshold else 'dashed'
 
 if __name__ == "__main__":
-    video_id="044" #base test
+    #video_id="044" #base test
+    #video_id="040" #grande beccheggio
     #video_id="008" #continua e non
-    #video_id="019" #leggera curva
+    video_id="019" #leggera curva
     #video_id="029"
     #video_id="043"
     datset_path = f"./archive/{video_id}/camera/front_camera/"
@@ -623,7 +661,7 @@ if __name__ == "__main__":
                                       min_peak_distance=PEAK_MIN_DISTANCE,
                                       n_lanes=2)
 
-        ### ? impelemntazione per riconoscimento corsia dx o sx
+        ###? impelemntazione per riconoscimento corsia dx o sx
         mid = binary.shape[1] // 2
 
         left  = [s for s in seeds if s < mid]
@@ -633,19 +671,55 @@ if __name__ == "__main__":
         left_seed  = left[-1]  if left  else None   # più vicino al centro
         right_seed = right[0]  if right else None   # più vicino al centro
 
+        print(f"Left seed {left_seed} –– Right seed {right_seed}")
         # ── Per-lane processing: fit + classify solid/dashed, one side at a time ──
-        lanes = []   # list of (seed, fit, type, color) for the sides actually detected
+        lanes = []
         lane_marking_colour = (0, 255, 0)
-        for side, seed in (('left', left_seed), ('right', right_seed)):
-            if seed is None:
-                continue
-            fit = fit_lane_from_seed(binary, seed, strip_half_width=25, deg=1)
-            if fit is None:
-                continue
-            lane_type = classify_lane(binary, seed)
-            print(f"{side.capitalize()} lane seed at x={seed} classified as {lane_type}")
-            lanes.append((seed, fit, lane_type, lane_marking_colour))
 
+        for side, seed, history, lost in [
+            ('left',  left_seed,  left_history,  left_lost),
+            ('right', right_seed, right_history, right_lost),
+        ]:
+            fit, lane_type = None, 'solid'
+
+            if seed is not None:
+                fit = fit_lane_from_seed(binary, seed, strip_half_width=25, deg=1, min_points=8)
+
+
+            if fit is not None:
+                # Controlla coerenza con la storia
+                if len(history) > 0:
+                    avg_seed = np.mean([h[0] for h in history])
+                    avg_slope = np.mean([h[1][0] for h in history])  # h[1] è il fit, [0] è 'a'
+                    
+                    seed_ok = abs(seed - avg_seed) < MAX_DEVIATION
+                    slope_ok = abs(fit[0] - avg_slope) < MAX_SLOPE_DEVIATION  # es. 0.15
+                    
+                    if not (seed_ok and slope_ok):
+                        fit = history[-1][1]
+                        lane_type = history[-1][2]
+                        seed = history[-1][0]
+                    else:
+                        lane_type = classify_lane(binary, seed)
+
+                history.append((seed, fit, lane_type))
+                lost = 0
+            else:
+                lost += 1
+                if lost <= MAX_LOST_FRAMES and len(history) > 0:
+                    # Fallback: usa l'ultimo fit buono
+                    seed, fit, lane_type = history[-1]
+                # else: fit resta None → no lane
+            if lost > MAX_LOST_FRAMES:
+                history.clear()
+            # Aggiorna i contatori (deque si aggiorna in-place, lost no)
+            if side == 'left':
+                left_lost = lost
+            else:
+                right_lost = lost
+
+            if fit is not None:
+                lanes.append((seed, fit, lane_type, lane_marking_colour))
         # ── Step 7: draw each lane on BEV with histogram overlay ──
         bev_lanes = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         for _, fit, lane_type, color in lanes:
@@ -679,6 +753,14 @@ if __name__ == "__main__":
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         cv2.imshow("[GOLD] final", final)
 
+        # reset before next video loop
+        if id == "00":
+            left_lost = 0
+            left_history.clear()
+            right_lost = 0
+            right_history.clear()
+
+        
         if cv2.waitKey(300) & 0xFF == ord('q'):
             break
 
