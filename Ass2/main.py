@@ -46,7 +46,61 @@ Y_MAX = 8.0                            # left boundary (meters)
 
 # lane column thresholding
 PEAK_MIN_DISTANCE = 30  # minimum pixel distance between peaks for NMS
- 
+
+# ── Pipeline tunables ──────────────────────────────────────────────────────
+# Preprocessing
+BLUR_KSIZE = (3, 3)
+
+# GOLD feature extraction
+GOLD_M = 10
+GOLD_LOW_THRESHOLD = 30
+GOLD_SIDE_MARGIN_RATIO = 0.3     # fraction of width zeroed on each side
+
+# Adaptive max thresholding
+ADAPTIVE_NEIGHBORHOOD = 8
+ADAPTIVE_K = 2
+ADAPTIVE_NOISE_FLOOR = 40
+
+# Morphological cleanup
+GEODESIC_ITERATIONS = 8
+VERTICAL_OPEN_KERNEL = (1, 15)
+
+# Crosswalk removal
+CROSSWALK_MARGIN_RATIO = 0.2
+CROSSWALK_DENSITY_THRESHOLD = 0.10
+
+# Connected-component filtering (two passes)
+CC_FIRST_MIN_AREA = 20
+CC_SECOND_MIN_AREA = 50
+CC_MIN_ASPECT = 2.0              # height/width ≥ this → vertical blob
+
+# Lane seed search
+LANE_MARGIN_RATIO = 0.15
+LANE_PEAK_HEIGHT_RATIO = 0.10    # peaks below this fraction of max are dropped
+LANE_MAX_MARKING_WIDTH = 15
+LANE_N = 2
+
+# Lane polynomial fit
+LANE_STRIP_HALF_WIDTH = 25
+LANE_FIT_DEG = 1
+LANE_MIN_POINTS = 10
+
+# Lane solid/dashed classification
+CLASSIFY_BAND = 10
+CLASSIFY_GAP_THRESHOLD = 0.5
+
+# Lane drawing
+LANE_N_DASHES = 6
+LANE_DASH_DUTY = 0.6
+LANE_THICKNESS_BEV = 3
+LANE_THICKNESS_FRAME = 4
+LEFT_LANE_COLOR = (0, 255, 255)
+RIGHT_LANE_COLOR = (255, 100, 0)
+
+# Display
+WAIT_KEY_MS = 300
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # IPM - Inverse Perspective Mapping
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -142,8 +196,7 @@ def adaptive_max_threshold(e, c=7, k=2):
     
     # 3. FIX: Calcoliamo la soglia finale combinando local e noise_floor.
     # Usiamo il valore MASSIMO tra la soglia adattiva e il noise_floor.
-    # Se local_threshold è 5 ma noise_floor è 40, useremo 40.
-    final_threshold = np.maximum(local_threshold, 40)
+    final_threshold = np.maximum(local_threshold, ADAPTIVE_NOISE_FLOOR)
     
     # 4. Applichiamo la condizione finale
     t = (e_float >= final_threshold).astype(np.uint8) * 255
@@ -380,7 +433,7 @@ def fit_lane_from_seed(binary_bev, seed, strip_half_width=30, deg=1, min_points=
 
     return fit
 
-def lane_segments(fit, bev_h, lane_type, n_dashes=6, duty=0.6):
+def lane_segments(fit, bev_h, lane_type, n_dashes=LANE_N_DASHES, duty=LANE_DASH_DUTY):
     """Return a list of BEV endpoint pairs for a straight lane fit.
 
     solid  -> one segment spanning the full image height.
@@ -506,7 +559,7 @@ def enhance_lanes(image):
     
     return enhanced_img
 
-def classify_lane(binary_bev, seed_x, band=10, gap_threshold=0.5):
+def classify_lane(binary_bev, seed_x, band=CLASSIFY_BAND, gap_threshold=CLASSIFY_GAP_THRESHOLD):
     """
     Classify a lane as 'solid' or 'dashed' based on the presence 
     of pixels in a vertical band around the seed.
@@ -586,60 +639,54 @@ if __name__ == "__main__":
 
 
         gray_bev = cv2.cvtColor(warped_image, cv2.COLOR_BGR2GRAY)
-        pct_mask = cv2.GaussianBlur(gray_bev, (3, 3), 0)
+        pct_mask = cv2.GaussianBlur(gray_bev, BLUR_KSIZE, 0)
 
-        
+
         #? GOLD Implementation
-        r = gold_feature_extraction(pct_mask, m=10, low_threshold=30)
-        margin = int(BEV_WIDTH * 0.3)
+        r = gold_feature_extraction(pct_mask, m=GOLD_M, low_threshold=GOLD_LOW_THRESHOLD)
+        margin = int(BEV_WIDTH * GOLD_SIDE_MARGIN_RATIO)
         r[:, :margin] = 0
         r[:, -margin:] = 0
 
 
-        binary = adaptive_max_threshold(r, c=8, k=2)
-        binary = cv2.GaussianBlur(binary, (3, 3), 0)
+        binary = adaptive_max_threshold(r, c=ADAPTIVE_NEIGHBORHOOD, k=ADAPTIVE_K)
+        binary = cv2.GaussianBlur(binary, BLUR_KSIZE, 0)
 
-        binary = geodesic_dilation(binary, num_iterations=8)
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+        binary = geodesic_dilation(binary, num_iterations=GEODESIC_ITERATIONS)
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, VERTICAL_OPEN_KERNEL)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_v)
 
         # Crosswalk removal
-        margin = int(binary.shape[1] * 0.2)
+        margin = int(binary.shape[1] * CROSSWALK_MARGIN_RATIO)
         active = binary[:, margin:-margin]
         row_density = np.count_nonzero(active, axis=1) / active.shape[1]
-        binary[row_density > 0.10] = 0
+        binary[row_density > CROSSWALK_DENSITY_THRESHOLD] = 0
 
         # Connected component filtering: tieni solo blob verticali e abbastanza grandi
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        min_area = 20
-        min_aspect = 2.0  # altezza/larghezza >= 2 -> struttura verticale
-
         filtered = np.zeros_like(binary)
         for lab in range(1, num_labels):
             w = stats[lab, cv2.CC_STAT_WIDTH]
             h = stats[lab, cv2.CC_STAT_HEIGHT]
             area = stats[lab, cv2.CC_STAT_AREA]
-            if area >= min_area and (w == 0 or h / w >= min_aspect):
+            if area >= CC_FIRST_MIN_AREA and (w == 0 or h / w >= CC_MIN_ASPECT):
                 filtered[labels == lab] = 255
 
         binary = filtered
 
         cv2.imshow("GOLD feature extraction", binary)
 
-        # Connected component filtering: tieni solo blob verticali e abbastanza grandi
+        # Second-pass CC filtering with a larger min area
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        min_area = 50
-        min_aspect = 2.0  # altezza/larghezza >= 2 -> struttura verticale
-
         filtered = np.zeros_like(binary)
         for lab in range(1, num_labels):
             w = stats[lab, cv2.CC_STAT_WIDTH]
             h = stats[lab, cv2.CC_STAT_HEIGHT]
             area = stats[lab, cv2.CC_STAT_AREA]
-            if area >= min_area and (w == 0 or h / w >= min_aspect):
+            if area >= CC_SECOND_MIN_AREA and (w == 0 or h / w >= CC_MIN_ASPECT):
                 filtered[labels == lab] = 255
 
-        binary = filtered    
+        binary = filtered
     
         observations = feature_identification(binary)
 
@@ -657,9 +704,10 @@ if __name__ == "__main__":
 
         # ── Step 5: column-projection histogram → lane seeds (GOLD Sec. 4.A) ──
         seeds, hist = find_lane_seeds_improved(binary,
-                                      margin_ratio=0.15,
+                                      margin_ratio=LANE_MARGIN_RATIO,
                                       min_peak_distance=PEAK_MIN_DISTANCE,
-                                      n_lanes=2)
+                                      n_lanes=LANE_N,
+                                      max_marking_width=LANE_MAX_MARKING_WIDTH)
 
         ###? impelemntazione per riconoscimento corsia dx o sx
         mid = binary.shape[1] // 2
@@ -674,16 +722,18 @@ if __name__ == "__main__":
         print(f"Left seed {left_seed} –– Right seed {right_seed}")
         # ── Per-lane processing: fit + classify solid/dashed, one side at a time ──
         lanes = []
-        lane_marking_colour = (0, 255, 0)
 
-        for side, seed, history, lost in [
-            ('left',  left_seed,  left_history,  left_lost),
-            ('right', right_seed, right_history, right_lost),
+        for side, seed, history, lost, lane_colour in [
+            ('left',  left_seed,  left_history,  left_lost,  LEFT_LANE_COLOR),
+            ('right', right_seed, right_history, right_lost, RIGHT_LANE_COLOR),
         ]:
             fit, lane_type = None, 'solid'
 
             if seed is not None:
-                fit = fit_lane_from_seed(binary, seed, strip_half_width=25, deg=1, min_points=8)
+                fit = fit_lane_from_seed(binary, seed,
+                                         strip_half_width=LANE_STRIP_HALF_WIDTH,
+                                         deg=LANE_FIT_DEG,
+                                         min_points=LANE_MIN_POINTS)
 
 
             if fit is not None:
@@ -719,11 +769,11 @@ if __name__ == "__main__":
                 right_lost = lost
 
             if fit is not None:
-                lanes.append((seed, fit, lane_type, lane_marking_colour))
+                lanes.append((seed, fit, lane_type, lane_colour))
         # ── Step 7: draw each lane on BEV with histogram overlay ──
         bev_lanes = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         for _, fit, lane_type, color in lanes:
-            draw_lane_bev(bev_lanes, fit, lane_type, color, thickness=3)
+            draw_lane_bev(bev_lanes, fit, lane_type, color, thickness=LANE_THICKNESS_BEV)
         h_bev, max_hist = bev_lanes.shape[0], max(hist.max(), 1.0)
         for x_col in range(len(hist)):
             bar = int(hist[x_col] / max_hist * (h_bev // 4))
@@ -741,7 +791,7 @@ if __name__ == "__main__":
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         for _, fit, lane_type, color in lanes:
             draw_lane_frame(final, fit, lane_type, H_bev_to_img,
-                            BEV_HEIGHT, color, thickness=4)
+                            BEV_HEIGHT, color, thickness=LANE_THICKNESS_FRAME)
         
         #show masked image over original frame
         color_mask_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
@@ -761,7 +811,7 @@ if __name__ == "__main__":
             right_history.clear()
 
         
-        if cv2.waitKey(300) & 0xFF == ord('q'):
+        if cv2.waitKey(WAIT_KEY_MS) & 0xFF == ord('q'):
             break
 
     
