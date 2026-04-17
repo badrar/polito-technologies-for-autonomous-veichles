@@ -2,7 +2,6 @@ import os
 import cv2
 import numpy as np
 from scipy.signal import find_peaks
-from lane_detection import calculate_threshold
 from ultralytics import YOLO
 
 from collections import deque
@@ -387,30 +386,6 @@ def feature_identification(binary_bev, expected_width=None, width_tol=0.4):
                 })
 
     return observations
-
-def find_lane_seeds(binary_bev, margin_ratio=0.15, min_peak_distance=40, n_lanes=2):
-    """
-    Column-projection histogram on the lower half of the binary BEV image.
-    Peaks in the histogram give the x-positions (seeds) of each lane marking.
-    NMS is applied through the `distance` parameter of find_peaks.
-    """
-    h, w   = binary_bev.shape
-    margin = int(w * margin_ratio)
-
-    lower = binary_bev[h // 2:, margin: w - margin].astype(np.float64)
-    hist  = np.zeros(w, dtype=np.float64)
-    hist[margin: w - margin] = lower.sum(axis=0)
-
-    if hist.max() == 0:
-        return [], hist
-
-    peaks, props = find_peaks(hist, distance=min_peak_distance, height=hist.max() * 0.10)
-    if len(peaks) == 0:
-        return [], hist
-
-    order = np.argsort(props['peak_heights'])[::-1]
-    seeds = sorted(peaks[order[:n_lanes]].tolist())
-    return seeds, hist
 
 def find_lane_seeds_improved(binary_bev, margin_ratio=0.15, min_peak_distance=40,
                     n_lanes=2, max_marking_width=15):
