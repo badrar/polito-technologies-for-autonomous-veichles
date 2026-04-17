@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 from scipy.signal import find_peaks
 from lane_detection import calculate_threshold
+from ultralytics import YOLO
 
 from collections import deque
 
@@ -100,6 +101,16 @@ RIGHT_LANE_COLOR = (255, 100, 0)
 # Display
 WAIT_KEY_MS = 300
 
+# YOLO object detection
+YOLO_MODEL_PATH = "yolov8n.pt"
+YOLO_CONF_THRESHOLD = 0.35
+# COCO classes relevant to driving scenes
+YOLO_KEEP_CLASSES = {0, 1, 2, 3, 5, 7}  # person, bicycle, car, motorcycle, bus, truck
+YOLO_BOX_COLOR = (0, 255, 0)
+YOLO_TEXT_COLOR = (0, 255, 255)
+
+yolo_model = YOLO(YOLO_MODEL_PATH)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # IPM - Inverse Perspective Mapping
@@ -167,6 +178,56 @@ def compute_homography_bev_to_img():
     return H_bev_to_img
  
  
+def compute_image_to_ground():
+    """
+    Direct 3x3 homography mapping image pixels to world ground-plane (Z=0)
+    coordinates (X forward, Y left), expressed in the same world frame used
+    by compute_homography_bev_to_img (camera placed at (CAMERA_X_OFFSET, 0,
+    CAMERA_HEIGHT)). Derived from the pinhole model:
+        [u, v, 1]^T ∝ K · [r1 | r2 | t] · [X, Y, 1]^T
+    so the inverse of [K · [r1|r2|t]] maps pixels to ground points.
+    """
+    fx, fy = FOCAL_LENGTH
+    cx, cy = PRINCIPAL_POINT
+    theta = np.radians(PITCH)
+
+    K = np.array([[fx, 0, cx],
+                  [0, fy, cy],
+                  [0,  0,  1]], dtype=np.float64)
+
+    R_base = np.array([[0, -1,  0],
+                       [0,  0, -1],
+                       [1,  0,  0]], dtype=np.float64)
+    R_pitch = np.array([[1, 0,            0],
+                        [0, np.cos(theta), -np.sin(theta)],
+                        [0, np.sin(theta),  np.cos(theta)]], dtype=np.float64)
+    R = R_pitch @ R_base
+
+    C_world = np.array([CAMERA_X_OFFSET, 0.0, CAMERA_HEIGHT])
+    t = -R @ C_world
+
+    H_ground_to_img = K @ np.column_stack([R[:, 0], R[:, 1], t])
+    return np.linalg.inv(H_ground_to_img)
+
+
+def image_point_to_ground(u, v, H_img_to_ground):
+    """
+    Back-project an image pixel to the ground plane. Returns forward distance
+    from the camera (X_rel, meters), lateral offset (Y_rel, meters, left +),
+    and Euclidean range. Returns None if the pixel lies on/above the horizon.
+    """
+    p = H_img_to_ground @ np.array([u, v, 1.0], dtype=np.float64)
+    if abs(p[2]) < 1e-9:
+        return None
+    X_world = p[0] / p[2]
+    Y_world = p[1] / p[2]
+    X_rel = X_world - CAMERA_X_OFFSET  # distance forward from camera
+    if X_rel <= 0:
+        return None  # point behind the camera / above horizon
+    distance = float(np.hypot(X_rel, Y_world))
+    return X_rel, Y_world, distance
+
+
 def compute_bev(image, H_bev_to_img):
     """Warp the perspective image into a bird's eye view using IPM."""
     bev = cv2.warpPerspective(
@@ -576,10 +637,10 @@ def classify_lane(binary_bev, seed_x, band=CLASSIFY_BAND, gap_threshold=CLASSIFY
     return 'solid' if coverage > gap_threshold else 'dashed'
 
 if __name__ == "__main__":
-    #video_id="044" #base test
+    video_id="044" #base test
     #video_id="040" #grande beccheggio
     #video_id="008" #continua e non
-    video_id="019" #leggera curva
+    #video_id="019" #leggera curva
     #video_id="029"
     #video_id="043"
     datset_path = f"./archive/{video_id}/camera/front_camera/"
@@ -613,6 +674,9 @@ if __name__ == "__main__":
                     return True, (None, 0)
 
     image_sequence = ImageSequence(datset_path)
+    H_img_to_ground = compute_image_to_ground()
+    H_bev_to_img_static = compute_homography_bev_to_img()
+    H_img_to_bev_static = np.linalg.inv(H_bev_to_img_static)
 
     while True:
         ret, (frame, id) = image_sequence.read(loop=True)
@@ -798,6 +862,45 @@ if __name__ == "__main__":
         color_mask_bev[binary > 0] = [255, 0, 255]  # Colored mask (Magenta)
         inv_warped_mask = cv2.warpPerspective(color_mask_bev, H_bev_to_img, (frame.shape[1], frame.shape[0]))
         cv2.addWeighted(inv_warped_mask, 0.4, final, 1.0, 0, final)
+
+        # ── Step 9: YOLO object detection + distance via BEV projection ──
+        yolo_results = yolo_model(frame, verbose=False)[0]
+        for box in yolo_results.boxes:
+            conf = float(box.conf[0])
+            cls_id = int(box.cls[0])
+            if conf < YOLO_CONF_THRESHOLD or cls_id not in YOLO_KEEP_CLASSES:
+                continue
+
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+            label = yolo_model.names[cls_id]
+
+            # Ground contact = bottom-center of the bbox
+            u_ground = (x1 + x2) // 2
+            v_ground = y2
+            ground = image_point_to_ground(u_ground, v_ground, H_img_to_ground)
+            if ground is None:
+                continue
+            X_rel, Y_rel, distance = ground
+
+            # Project the same point into BEV pixels for the side-view marker
+            pb = H_img_to_bev_static @ np.array([u_ground, v_ground, 1.0])
+            u_bev = pb[0] / pb[2]
+            v_bev = pb[1] / pb[2]
+
+            cv2.rectangle(final, (x1, y1), (x2, y2), YOLO_BOX_COLOR, 2)
+            text = f"{label} {distance:.1f}m"
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(final, (x1, y1 - th - 8), (x1 + tw + 4, y1), YOLO_BOX_COLOR, -1)
+            cv2.putText(final, text, (x1 + 2, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+            # Mirror marker on the BEV visualization if inside the ROI
+            ub, vb = int(round(u_bev)), int(round(v_bev))
+            if 0 <= ub < BEV_WIDTH and 0 <= vb < BEV_HEIGHT:
+                cv2.circle(bev_lanes, (ub, vb), 6, YOLO_TEXT_COLOR, -1)
+                cv2.putText(bev_lanes, f"{distance:.1f}m", (ub + 6, vb - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, YOLO_TEXT_COLOR, 1)
+        cv2.imshow("BEV lanes", bev_lanes)
 
         cv2.putText(final, f"Image ID: {id}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
