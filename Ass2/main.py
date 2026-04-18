@@ -27,6 +27,7 @@ left_history  = deque(maxlen=HISTORY_LEN)
 right_history = deque(maxlen=HISTORY_LEN)
 left_lost  = 0
 right_lost = 0
+geodesic_dilation_debug_saved = False
 
 
 # Intrinsic camera parameters 
@@ -307,6 +308,8 @@ def geodesic_dilation(r, num_iterations=3):
     r: numpy array (l'immagine in uscita dal passaggio precedente)
     num_iterations: quante volte ripetere il processo ("a few iterations")
     """
+    global geodesic_dilation_debug_saved
+    
     # 1. Immagine di controllo c(x,y) - Equazione (7)
     # Creiamo una maschera che vale 1 dove r non è 0, e 0 altrimenti.
     # Usiamo lo stesso tipo di dato di r per poter fare la moltiplicazione dopo.
@@ -321,7 +324,7 @@ def geodesic_dilation(r, num_iterations=3):
     enhanced_r = r.copy()
     
     # 3. Applichiamo le iterazioni
-    for _ in range(num_iterations):
+    for i in range(num_iterations):
         # Passo A: Calcola il "valore massimo nell'intorno" descritto dal kernel
         # La funzione dilate fa esattamente questo.
         dilated = cv2.dilate(enhanced_r, kernel)
@@ -329,7 +332,13 @@ def geodesic_dilation(r, num_iterations=3):
         # Passo B: Moltiplica per l'immagine di controllo
         # Questo assicura che le zone a 0 nell'immagine originale rimangano a 0
         enhanced_r = dilated * c
-        
+        # save intermediate results for debugging
+        if DEBUG and not geodesic_dilation_debug_saved:
+            cv2.imwrite(f"./debug/geodesic_dilation_iteration_{i+1}.png", enhanced_r)
+            print(f"Saved geodesic dilation result for iteration {i+1} to ./debug/")
+            
+    if DEBUG and not geodesic_dilation_debug_saved: geodesic_dilation_debug_saved = True
+
     return enhanced_r
 
 def feature_identification(binary_bev, expected_width=None, width_tol=0.4):
@@ -419,7 +428,7 @@ def find_lane_seeds_improved(binary_bev, margin_ratio=0.15, min_peak_distance=40
         return [], hist
 
     peaks, props = find_peaks(hist, distance=min_peak_distance,
-                              height=hist.max() * 0.10)
+                              height=hist.max() * LANE_PEAK_HEIGHT_RATIO)
     if len(peaks) == 0:
         return [], hist
 
@@ -727,18 +736,18 @@ if __name__ == "__main__":
 
         binary = filtered
     
-        observations = feature_identification(binary)
+        # observations = feature_identification(binary)
 
-        #histogram over w_i value from observations, to find the most common lane width in the image, which can be used as a prior for lane detection and filtering. This can help to identify lanes that are more likely to be valid based on their width, and to filter out noise or false positives that do not match the expected lane width distribution.
-        w_histogram = {}
-        for obs in observations:
-            w = obs['w']
-            w_histogram[w] = w_histogram.get(w, 0) + 1
+        # #histogram over w_i value from observations, to find the most common lane width in the image, which can be used as a prior for lane detection and filtering. This can help to identify lanes that are more likely to be valid based on their width, and to filter out noise or false positives that do not match the expected lane width distribution.
+        # w_histogram = {}
+        # for obs in observations:
+        #     w = obs['w']
+        #     w_histogram[w] = w_histogram.get(w, 0) + 1
         
-        #lowpass filter on histogram
-        w_histogram_filtered = {}
-        for w in w_histogram:
-            w_histogram_filtered[w] = w_histogram.get(w-1, 0) + w_histogram[w] + w_histogram.get(w+1, 0)
+        # #lowpass filter on histogram
+        # w_histogram_filtered = {}
+        # for w in w_histogram:
+        #     w_histogram_filtered[w] = w_histogram.get(w-1, 0) + w_histogram[w] + w_histogram.get(w+1, 0)
 
 
         # ── Step 5: column-projection histogram → lane seeds (GOLD Sec. 4.A) ──
