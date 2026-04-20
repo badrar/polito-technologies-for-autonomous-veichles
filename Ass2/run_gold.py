@@ -13,19 +13,12 @@ geodesic_dilation_debug_saved = False
 first_run_debug_images_saved = False
 
 # frame buffer for temporal consistency in lane seed tracking
-# this is implemented to avoid high variance in high noise frames, 
-#   by keeping a history of recent seeds and checking if the current
-#   seed is consistent with the recent history. If a seed deviates too 
-#   much from the average of the history, it can be considered a false
-#   positive and ignored. Additionally, if no seeds are detected for 
-#   several consecutive frames, we can declare that no lanes are 
-#   detected, which can help to avoid false positives in frames where 
-#   the lane markings are not visible.
+# this is implemented to avoid high variance in high noise frames.
 
-HISTORY_LEN = 6          # quanti frame tenere
-MAX_DEVIATION = 100       # pixel: se il seed attuale dista più di così dalla media, è sospetto
-MAX_LOST_FRAMES = 4     # dopo tot frame senza detection → "no lanes detected"
-MAX_SLOPE_DEVIATION = 0.10  # per la coerenza della pendenza del fit (es. 0.15 per strade quasi dritte)
+HISTORY_LEN = 6          # how many frames to keep
+MAX_DEVIATION = 100       # pixel: if current seed deviates more than this from avg, it's suspect
+MAX_LOST_FRAMES = 4     # after this many frames without detection → "no lanes detected"
+MAX_SLOPE_DEVIATION = 0.10  # slope consistency tolerance (e.g. 0.15 for nearly straight roads)
 
 left_history  = deque(maxlen=HISTORY_LEN)
 right_history = deque(maxlen=HISTORY_LEN)
@@ -241,30 +234,30 @@ def compute_bev(image, H_bev_to_img):
 
 def adaptive_max_threshold(e, c=7, k=2):
     """
-    Implementa la binarizzazione adattiva basata sul massimo locale (Equazione 9),
-    con l'aggiunta vitale di un noise_floor per evitare il rumore sull'asfalto.
-    
-    e: immagine enhanced in ingresso (uint8)
-    c: dimensione del vicinato (c x c)
-    k: costante di divisione (dal paper k=2)
+    Adaptive binarization based on local maximum (Equation 9),
+    with an added noise_floor to suppress asphalt noise.
+
+    e: enhanced input image (uint8)
+    c: neighbourhood size (c x c)
+    k: division constant (from paper k=2)
     """
-    # Assicuriamoci che l'immagine sia in float per la divisione
+    # Cast to float for division
     e_float = e.astype(np.float32)
-    
-    # 1. Calcoliamo m(x,y): il valore massimo in un intorno c x c
+
+    # 1. Compute m(x,y): maximum value in a c x c neighbourhood
     kernel = np.ones((c, c), np.uint8)
     m = cv2.dilate(e_float, kernel)
-    
-    # 2. Calcoliamo la soglia locale adattiva (Equazione 9)
+
+    # 2. Compute adaptive local threshold (Equation 9)
     local_threshold = m / k
-    
-    # 3. FIX: Calcoliamo la soglia finale combinando local e noise_floor.
-    # Usiamo il valore MASSIMO tra la soglia adattiva e il noise_floor.
+
+    # 3. FIX: Combine local threshold with noise_floor.
+    # Use the MAX between adaptive threshold and noise_floor.
     final_threshold = np.maximum(local_threshold, ADAPTIVE_NOISE_FLOOR)
-    
-    # 4. Applichiamo la condizione finale
+
+    # 4. Apply final condition
     t = (e_float >= final_threshold).astype(np.uint8) * 255
-    
+
     return t
 
 def gold_feature_extraction(pct_mask, m=8, low_threshold=30):
@@ -305,35 +298,29 @@ def gold_feature_extraction(pct_mask, m=8, low_threshold=30):
 
 def geodesic_dilation(r, num_iterations=3):
     """
-    Migliora l'immagine filtrata applicando la dilatazione morfologica geodetica.
-    
-    Parametri:
-    r: numpy array (l'immagine in uscita dal passaggio precedente)
-    num_iterations: quante volte ripetere il processo ("a few iterations")
+    Enhance the filtered image via geodesic morphological dilation.
+
+    r: numpy array (output from the previous stage)
+    num_iterations: how many times to repeat the process ("a few iterations")
     """
     global geodesic_dilation_debug_saved
-    
-    # 1. Immagine di controllo c(x,y) - Equazione (7)
-    # Creiamo una maschera che vale 1 dove r non è 0, e 0 altrimenti.
-    # Usiamo lo stesso tipo di dato di r per poter fare la moltiplicazione dopo.
+
+    # 1. Control image c(x,y) - Equation (7)
+    # Mask that is 1 where r is non-zero, 0 otherwise.
     c = (r != 0).astype(r.dtype)
-    
-    # 2. Elemento Strutturante - La griglia 3x3
-    # OpenCV ha una costante MORPH_CROSS che crea esattamente la griglia
-    # con i punti cardinali descritta nella tua immagine.
+
+    # 2. Structuring element - 3x3 cross grid
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-    
-    # Creiamo una copia di r su cui lavorare
+
     enhanced_r = r.copy()
-    
-    # 3. Applichiamo le iterazioni
+
+    # 3. Iterative dilation
     for i in range(num_iterations):
-        # Passo A: Calcola il "valore massimo nell'intorno" descritto dal kernel
-        # La funzione dilate fa esattamente questo.
+        # Step A: compute max value in the neighbourhood defined by the kernel
         dilated = cv2.dilate(enhanced_r, kernel)
-        
-        # Passo B: Moltiplica per l'immagine di controllo
-        # Questo assicura che le zone a 0 nell'immagine originale rimangano a 0
+
+        # Step B: multiply by control image
+        # Ensures that regions originally at 0 stay at 0
         enhanced_r = dilated * c
         # save intermediate results for debugging
         if DEBUG and not geodesic_dilation_debug_saved:
@@ -351,9 +338,9 @@ def find_lane_seeds_improved(binary_bev, margin_ratio=0.15, min_peak_distance=40
 
     roi = binary_bev[h // 2:, margin:w - margin]
 
-    # Per ogni colonna conta in quante RIGHE c'è almeno un pixel bianco,
-    # ma solo se il run orizzontale in quella riga è stretto (≤ max_marking_width).
-    # Questo elimina i picchi da oggetti larghi.
+    # For each column, count how many ROWS have at least one white pixel,
+    # but only if the horizontal run in that row is narrow (≤ max_marking_width).
+    # This suppresses peaks from wide objects.
     row_count = np.zeros(roi.shape[1], dtype=np.float64)
     for y in range(roi.shape[0]):
         row = roi[y]
@@ -401,17 +388,17 @@ def fit_lane_from_seed(binary_bev, seed, strip_half_width=30, deg=1, min_points=
         if DEBUG: print(f"Seed {seed}: not enough points ({len(ys_rel)}) for fitting.")
         return None
 
-    # Quante righe distinte hanno pixel? Se troppo poche, è rumore
+    # How many distinct rows have pixels? If too few, it's noise
     row_coverage = len(np.unique(ys_rel)) / h
-    if row_coverage < 0.15:  # meno del 15% delle righe ha pixel → probabilmente rumore
+    if row_coverage < 0.15:  # less than 15% of rows have pixels → likely noise
         if DEBUG: print(f"Seed {seed}: low row coverage ({row_coverage:.2f}), likely noise.")
         return None
 
-    # Dopo il check row_coverage, prima del polyfit
+    # After row_coverage check, before polyfit
     xs = (xs_rel + x_lo).astype(np.float32)
     ys = ys_rel.astype(np.float32)
 
-    # Fit e poi controlla il residuo
+    # Fit and then check the residual
     try:
         fit = np.polyfit(ys, xs, deg)
     except np.linalg.LinAlgError:
@@ -420,7 +407,7 @@ def fit_lane_from_seed(binary_bev, seed, strip_half_width=30, deg=1, min_points=
 
     residuals = xs - np.polyval(fit, ys)
     rmse = np.sqrt(np.mean(residuals ** 2))
-    if rmse > 3:  # pixel — una lane vera ha residuo bassissimo --> 6 andava bene per il dastaset borderline
+    if rmse > 3:  # pixel — a real lane has very low residual; 6 worked for the borderline dataset
         if DEBUG: print(f"Seed {seed}: high RMSE ({rmse:.2f}), likely bad fit.")
         return None
 
@@ -468,88 +455,79 @@ def draw_lane_frame(img, fit, lane_type, H_bev_to_img, bev_h,
 
 def calcola_soglia_iterativa(immagine):
     """
-    Calcola la soglia ottimale di un'immagine in scala di grigi
-    utilizzando l'algoritmo iterativo descritto.
-    
-    Parametri:
-    immagine (numpy.ndarray): L'immagine di input in scala di grigi (matrice 2D).
-    
-    Ritorna:
-    float: Il valore della soglia finale calcolata.
+    Compute the optimal threshold of a grayscale image
+    using the iterative thresholding algorithm.
+
+    immagine (numpy.ndarray): grayscale input image (2D array).
+    Returns: float, the final computed threshold value.
     """
-    # Assicuriamoci che l'immagine sia un array numpy (usiamo float per evitare overflow)
-    img = immagine    
+    img = immagine
     # --- Step 1 ---
-    # Calcolo di g_max e g_min nell'immagine originale
+    # Compute g_max and g_min of the original image
     g_max = np.max(img)
     g_min = np.min(img)
-    
-    # Inizializzazione della soglia (Th_0)
+
+    # Initial threshold (Th_0)
     th_corrente = (g_max + g_min) / 2.0
-    
-    iterazione = 0
-    
+
     while True:
         # --- Step 2 ---
-        # Divisione in due regioni:
-        # Regione A: pixel >= Th_i
-        # Regione B: pixel < Th_i
+        # Split into two regions:
+        # Region A: pixel >= Th_i
+        # Region B: pixel < Th_i
         regione_a = img[img >= th_corrente]
         regione_b = img[img < th_corrente]
-        
-        # Calcolo dei valori medi g_A e g_B
-        # np.mean fa esattamente la somma dei valori divisa per il numero di elementi.
-        # Aggiungiamo un controllo per evitare divisioni per zero nel caso una regione sia vuota.
+
+        # Compute mean values g_A and g_B
+        # Guard against empty regions to avoid division by zero.
         g_a = np.mean(regione_a) if len(regione_a) > 0 else 0
         g_b = np.mean(regione_b) if len(regione_b) > 0 else 0
-        
+
         # --- Step 3 ---
-        # Aggiornamento della soglia (Th_i+1)
+        # Update threshold (Th_i+1)
         th_successivo = (g_a + g_b) / 2.0
-        
+
         # --- Step 4 ---
-        # Il processo si ripete finché Th_i+1 non è uguale a Th_i
-        # Nota: usiamo una tolleranza minima (1e-5) al posto dell'uguaglianza stretta (==) 
-        # perché stiamo lavorando con numeri in virgola mobile (float).
+        # Repeat until Th_i+1 == Th_i
+        # Using a small tolerance instead of strict equality for floating-point safety.
         if abs(th_successivo - th_corrente) < 1e-5:
             break
-            
+
         th_corrente = th_successivo
-        iterazione += 1
-        
+
     return th_corrente
 
 def create_lane_kernels(sigma_x, sigma_y, kernel_size):
-    """Crea i kernel 1D g(x) e g(y) basati sulle formule della slide."""
-    
-    # Creiamo un array di coordinate centrate sullo zero (es. da -2 a +2)
+    """Create the 1D kernels g(x) and g(y) based on the slide formulas."""
+
+    # Zero-centred coordinate arrays (e.g. from -2 to +2)
     half_size = kernel_size // 2
     x = np.arange(-half_size, half_size + 1)
     y = np.arange(-half_size, half_size + 1)
-    
-    # Calcoliamo g(x): Derivata seconda della gaussiana (orizzontale)
-    # Questa formula esalta i picchi di luce stretti (la linea della corsia)
+
+    # g(x): second derivative of Gaussian (horizontal)
+    # Enhances narrow bright peaks (lane markings)
     g_x = (1 / (sigma_x**2)) * np.exp(-(x**2) / (2 * sigma_x**2)) * (1 - (x**2) / (sigma_x**2))
-    
-    # Calcoliamo g(y): Gaussiana standard (verticale)
-    # Questa formula "spalma" il segnale verticalmente
+
+    # g(y): standard Gaussian (vertical)
+    # Smooths the signal vertically
     g_y = np.exp(-(y**2) / (2 * sigma_y**2))
-    
+
     return g_x, g_y
 
 def enhance_lanes(image):
-    # 1. Imposta i parametri (da tarare in base alla risoluzione della telecamera)
-    sigma_x = 2.0  # Legato alla larghezza in pixel della corsia
-    sigma_y = 5.0  # Quanto vogliamo lisciare verticalmente
-    k_size = 11    # Dimensione del kernel (deve essere dispari)
-    
-    # 2. Genera i kernel 1D
+    # 1. Set parameters (tune based on camera resolution)
+    sigma_x = 2.0  # Related to lane width in pixels
+    sigma_y = 5.0  # How much to smooth vertically
+    k_size = 11    # Kernel size (must be odd)
+
+    # 2. Generate 1D kernels
     g_x, g_y = create_lane_kernels(sigma_x, sigma_y, k_size)
-    
-    # 3. Applica il filtro separabile in modo super efficiente
-    # cv2.CV_32F indica che vogliamo il risultato in float (i valori possono essere negativi)
+
+    # 3. Apply separable filter
+    # cv2.CV_32F for float output (values can be negative)
     enhanced_img = cv2.sepFilter2D(image, cv2.CV_32F, g_x, g_y)
-    
+
     return enhanced_img
 
 def classify_lane(binary_bev, seed_x, band=CLASSIFY_BAND, gap_threshold=CLASSIFY_GAP_THRESHOLD):
@@ -561,7 +539,7 @@ def classify_lane(binary_bev, seed_x, band=CLASSIFY_BAND, gap_threshold=CLASSIFY
     x_lo = max(0, seed_x - band)
     x_hi = min(w, seed_x + band)
 
-    # Per ogni riga: c'è almeno un pixel acceso nella banda?
+    # For each row: is there at least one lit pixel in the band?
     presence = np.any(binary_bev[:, x_lo:x_hi] > 0, axis=1).astype(np.float64)
 
     coverage = presence.mean()
@@ -581,7 +559,7 @@ if __name__ == "__main__":
 
     print(f"Found {len(image_files)} images.")
 
-    #vidcap alike to read images in sequence
+    # vidcap-like class to read images in sequence
     class ImageSequence:
         def __init__(self, file_list):
             self.file_list = file_list
@@ -672,7 +650,7 @@ if __name__ == "__main__":
         row_density = np.count_nonzero(active, axis=1) / active.shape[1]
         binary[row_density > CROSSWALK_DENSITY_THRESHOLD] = 0
 
-        # Connected component filtering: tieni solo blob verticali e abbastanza grandi
+        # Connected component filtering: keep only vertical and large enough blobs
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         filtered = np.zeros_like(binary)
         for lab in range(1, num_labels):
@@ -710,15 +688,15 @@ if __name__ == "__main__":
                                       n_lanes=LANE_N,
                                       max_marking_width=LANE_MAX_MARKING_WIDTH)
 
-        ###? impelemntazione per riconoscimento corsia dx o sx
+        ###? left/right lane seed assignment
         mid = binary.shape[1] // 2
 
         left  = [s for s in seeds if s < mid]
         right = [s for s in seeds if s >= mid]
 
-        # Prendi il più forte per lato
-        left_seed  = left[-1]  if left  else None   # più vicino al centro
-        right_seed = right[0]  if right else None   # più vicino al centro
+        # Pick the strongest per side
+        left_seed  = left[-1]  if left  else None   # closest to centre
+        right_seed = right[0]  if right else None   # closest to centre
 
         print(f"Left seed {left_seed} - Right seed {right_seed}")
         #draw line for right seed on bev_image
@@ -741,13 +719,13 @@ if __name__ == "__main__":
 
 
             if fit is not None:
-                # Controlla coerenza con la storia
+                # Check consistency with history
                 if len(history) > 0:
                     avg_seed = np.mean([h[0] for h in history])
-                    avg_slope = np.mean([h[1][0] for h in history])  # h[1] è il fit, [0] è 'a'
+                    avg_slope = np.mean([h[1][0] for h in history])  # h[1] is the fit, [0] is 'a'
                     
                     seed_ok = abs(seed - avg_seed) < MAX_DEVIATION
-                    slope_ok = abs(fit[0] - avg_slope) < MAX_SLOPE_DEVIATION  # es. 0.15
+                    slope_ok = abs(fit[0] - avg_slope) < MAX_SLOPE_DEVIATION
                     
                     if not (seed_ok and slope_ok):
                         fit = history[-1][1]
@@ -761,12 +739,12 @@ if __name__ == "__main__":
             else:
                 lost += 1
                 if lost <= MAX_LOST_FRAMES and len(history) > 0:
-                    # Fallback: usa l'ultimo fit buono
+                    # Fallback: use last good fit
                     seed, fit, lane_type = history[-1]
-                # else: fit resta None → no lane
+                # else: fit stays None → no lane
             if lost > MAX_LOST_FRAMES:
                 history.clear()
-            # Aggiorna i contatori (deque si aggiorna in-place, lost no)
+            # Update counters (deque updates in-place, lost does not)
             if side == 'left':
                 left_lost = lost
             else:
