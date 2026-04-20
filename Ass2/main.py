@@ -49,7 +49,7 @@ Y_MAX = 8.0                            # left boundary (meters)
 # lane column thresholding
 PEAK_MIN_DISTANCE = 30  # minimum pixel distance between peaks for NMS
 
-# ── Pipeline tunables ──────────────────────────────────────────────────────
+# == Pipeline tunables ========================================
 # Preprocessing
 BLUR_KSIZE = (3, 3)
 
@@ -705,7 +705,7 @@ if __name__ == "__main__":
 
         binary = filtered
 
-        # ── Step 5: column-projection histogram → lane seeds (GOLD Sec. 4.A) ──
+        # = Step 5: column-projection histogram → lane seeds (GOLD Sec. 4.A) =
         seeds, hist = find_lane_seeds_improved(binary,
                                       margin_ratio=LANE_MARGIN_RATIO,
                                       min_peak_distance=PEAK_MIN_DISTANCE,
@@ -723,7 +723,7 @@ if __name__ == "__main__":
         right_seed = right[0]  if right else None   # più vicino al centro
 
         print(f"Left seed {left_seed} –– Right seed {right_seed}")
-        # ── Per-lane processing: fit + classify solid/dashed, one side at a time ──
+        # = Per-lane processing: fit + classify solid/dashed, one side at a time =
         lanes = []
 
         for side, seed, history, lost, lane_colour in [
@@ -773,7 +773,7 @@ if __name__ == "__main__":
 
             if fit is not None:
                 lanes.append((seed, fit, lane_type, lane_colour))
-        # ── Step 7: draw each lane on BEV with histogram overlay ──
+        # = Step 7: draw each lane on BEV with histogram overlay =
         bev_lanes = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         for _, fit, lane_type, color in lanes:
             draw_lane_bev(bev_lanes, fit, lane_type, color, thickness=LANE_THICKNESS_BEV)
@@ -786,7 +786,7 @@ if __name__ == "__main__":
             cv2.line(bev_lanes, (seed, 0), (seed, h_bev), (0, 0, 255), 1)
         cv2.imshow("BEV lanes", bev_lanes)
 
-        # ── Step 8: reproject each lane onto original camera frame ──
+        # = Step 8: reproject each lane onto original camera frame =
         final = frame.copy()
         if not lanes:
             # show no lanes detected message on the frame center
@@ -802,7 +802,7 @@ if __name__ == "__main__":
         inv_warped_mask = cv2.warpPerspective(color_mask_bev, H_bev_to_img, (frame.shape[1], frame.shape[0]))
         cv2.addWeighted(inv_warped_mask, 0.4, final, 1.0, 0, final)
 
-        # ── Step 9: YOLO object detection + distance via BEV projection ──
+        # = Step 9: YOLO object detection + distance via BEV projection =
         yolo_results = yolo_model(frame, verbose=False)[0]
         for box in yolo_results.boxes:
             conf = float(box.conf[0])
