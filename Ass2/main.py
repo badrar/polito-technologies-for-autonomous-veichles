@@ -21,7 +21,7 @@ first_run_debug_images_saved = False
 #   the lane markings are not visible.
 
 HISTORY_LEN = 6          # quanti frame tenere
-MAX_DEVIATION = 5       # pixel: se il seed attuale dista più di così dalla media, è sospetto
+MAX_DEVIATION = 100       # pixel: se il seed attuale dista più di così dalla media, è sospetto
 MAX_LOST_FRAMES = 4     # dopo tot frame senza detection → "no lanes detected"
 MAX_SLOPE_DEVIATION = 0.10  # per la coerenza della pendenza del fit (es. 0.15 per strade quasi dritte)
 
@@ -47,7 +47,7 @@ Y_MIN = -8.0                           # right boundary (meters)
 Y_MAX = 8.0                            # left boundary (meters)
 
 # lane column thresholding
-PEAK_MIN_DISTANCE = 30  # minimum pixel distance between peaks for NMS
+PEAK_MIN_DISTANCE = 20  # minimum pixel distance between peaks for NMS
 
 # == Pipeline tunables ========================================
 # Preprocessing
@@ -78,7 +78,7 @@ CC_MIN_ASPECT = 2.0              # height/width ≥ this → vertical blob
 
 # Lane seed search
 LANE_MARGIN_RATIO = 0.15
-LANE_PEAK_HEIGHT_RATIO = 0.10    # peaks below this fraction of max are dropped
+LANE_PEAK_HEIGHT_RATIO = 0.08    # peaks below this fraction of max are dropped
 LANE_MAX_MARKING_WIDTH = 15
 LANE_N = 2
 
@@ -722,7 +722,10 @@ if __name__ == "__main__":
         left_seed  = left[-1]  if left  else None   # più vicino al centro
         right_seed = right[0]  if right else None   # più vicino al centro
 
-        print(f"Left seed {left_seed} –– Right seed {right_seed}")
+        print(f"Left seed {left_seed} - Right seed {right_seed}")
+        #draw line for right seed on bev_image
+
+
         # = Per-lane processing: fit + classify solid/dashed, one side at a time =
         lanes = []
 
