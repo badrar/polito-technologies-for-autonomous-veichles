@@ -7,6 +7,8 @@ from ultralytics import YOLO
 from collections import deque
 
 DEBUG = True
+geodesic_dilation_debug_saved = False
+first_run_debug_images_saved = False
 
 # frame buffer for temporal consistency in lane seed tracking
 # this is implemented to avoid high variance in high noise frames, 
@@ -27,7 +29,6 @@ left_history  = deque(maxlen=HISTORY_LEN)
 right_history = deque(maxlen=HISTORY_LEN)
 left_lost  = 0
 right_lost = 0
-geodesic_dilation_debug_saved = False
 
 
 # Intrinsic camera parameters 
@@ -95,8 +96,8 @@ LANE_N_DASHES = 6
 LANE_DASH_DUTY = 0.6
 LANE_THICKNESS_BEV = 3
 LANE_THICKNESS_FRAME = 4
-LEFT_LANE_COLOR = (0, 255, 255)
-RIGHT_LANE_COLOR = (255, 100, 0)
+LEFT_LANE_COLOR = (0, 255, 0)
+RIGHT_LANE_COLOR = (0, 255, 0)
 
 # Display
 WAIT_KEY_MS = 300
@@ -340,61 +341,6 @@ def geodesic_dilation(r, num_iterations=3):
     if DEBUG and not geodesic_dilation_debug_saved: geodesic_dilation_debug_saved = True
 
     return enhanced_r
-
-def feature_identification(binary_bev, expected_width=None, width_tol=0.4):
-    """
-    GOLD Feature Identification su run contigui anziché pixel singoli.
-    
-    Per ogni riga trova i segmenti contigui di pixel bianchi,
-    ne prende il centroide, e considera solo coppie di run ADIACENTI.
-    """
-    H, N = binary_bev.shape
-    observations = []
-
-    for i in range(H):
-        # ── Trova i "run" contigui nella riga ──
-        row = binary_bev[i]
-        runs = []
-        in_run = False
-        for x in range(N):
-            if row[x] > 0 and not in_run:
-                start = x
-                in_run = True
-            elif row[x] == 0 and in_run:
-                runs.append((start, x - 1))
-                in_run = False
-        if in_run:
-            runs.append((start, N - 1))
-
-        if len(runs) < 2:
-            continue
-
-        # ── Considera solo coppie ADIACENTI di run ──
-        for j in range(len(runs) - 1):
-            p = (runs[j][0] + runs[j][1]) / 2.0    # centroide run sinistro
-            q = (runs[j+1][0] + runs[j+1][1]) / 2.0  # centroide run destro
-
-            candidates = [
-                ((p + q) / 2.0, (q - p) / 2.0, 'A'),
-                (q,             q - p,          'B'),
-                (p,             q - p,          'C'),
-            ]
-
-            for c, w, cfg in candidates:
-                # Vincoli geometrici GOLD
-                if not (0 <= c <= N and w < N / 3
-                        and c - w <= 0.75 * N
-                        and c + w >= N / 4):
-                    continue
-                # Filtro opzionale sulla larghezza attesa
-                if expected_width is not None:
-                    if abs(w - expected_width) > width_tol * expected_width:
-                        continue
-                observations.append({
-                    'row': i, 'c': c, 'w': w, 'config': cfg
-                })
-
-    return observations
 
 def find_lane_seeds_improved(binary_bev, margin_ratio=0.15, min_peak_distance=40,
                     n_lanes=2, max_marking_width=15):
@@ -696,13 +642,31 @@ if __name__ == "__main__":
         r[:, :margin] = 0
         r[:, -margin:] = 0
 
+        if DEBUG and not first_run_debug_images_saved:
+            cv2.imwrite("./debug/1_pct_mask.png", pct_mask)
+            cv2.imwrite("./debug/2_gold_response.png", r)
+            print("Saved GOLD intermediate images to ./debug/")
+        
+        binary = geodesic_dilation(r, num_iterations=GEODESIC_ITERATIONS)
 
-        binary = adaptive_max_threshold(r, c=ADAPTIVE_NEIGHBORHOOD, k=ADAPTIVE_K)
-        binary = cv2.GaussianBlur(binary, BLUR_KSIZE, 0)
+        if DEBUG and not first_run_debug_images_saved:
+            cv2.imwrite("./debug/3_geodesic_dilation.png", binary)
+            print("Saved geodesic dilation result to ./debug/")
+        
+        binary = adaptive_max_threshold(binary, c=ADAPTIVE_NEIGHBORHOOD, k=ADAPTIVE_K)
+        
+        if DEBUG and not first_run_debug_images_saved:
+            cv2.imwrite("./debug/4_adaptive_threshold.png", binary)
+            print("Saved adaptive threshold result to ./debug/")
 
-        binary = geodesic_dilation(binary, num_iterations=GEODESIC_ITERATIONS)
+
         kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, VERTICAL_OPEN_KERNEL)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_v)
+
+        if DEBUG and not first_run_debug_images_saved:
+            cv2.imwrite("./debug/5_vertical_open.png", binary)
+            print("Saved vertical opening result to ./debug/")
+        
 
         # Crosswalk removal
         margin = int(binary.shape[1] * CROSSWALK_MARGIN_RATIO)
@@ -717,8 +681,13 @@ if __name__ == "__main__":
             w = stats[lab, cv2.CC_STAT_WIDTH]
             h = stats[lab, cv2.CC_STAT_HEIGHT]
             area = stats[lab, cv2.CC_STAT_AREA]
-            if area >= CC_FIRST_MIN_AREA and (w == 0 or h / w >= CC_MIN_ASPECT):
+            if area >= CC_FIRST_MIN_AREA and (w == 0 or h / w >= 3):
                 filtered[labels == lab] = 255
+
+        if DEBUG and not first_run_debug_images_saved:
+            cv2.imwrite("./debug/6_cc_filtering.png", filtered)
+            print("Saved connected component filtering result to ./debug/")
+            first_run_debug_images_saved = True
 
         binary = filtered
 
@@ -735,20 +704,6 @@ if __name__ == "__main__":
                 filtered[labels == lab] = 255
 
         binary = filtered
-    
-        # observations = feature_identification(binary)
-
-        # #histogram over w_i value from observations, to find the most common lane width in the image, which can be used as a prior for lane detection and filtering. This can help to identify lanes that are more likely to be valid based on their width, and to filter out noise or false positives that do not match the expected lane width distribution.
-        # w_histogram = {}
-        # for obs in observations:
-        #     w = obs['w']
-        #     w_histogram[w] = w_histogram.get(w, 0) + 1
-        
-        # #lowpass filter on histogram
-        # w_histogram_filtered = {}
-        # for w in w_histogram:
-        #     w_histogram_filtered[w] = w_histogram.get(w-1, 0) + w_histogram[w] + w_histogram.get(w+1, 0)
-
 
         # ── Step 5: column-projection histogram → lane seeds (GOLD Sec. 4.A) ──
         seeds, hist = find_lane_seeds_improved(binary,
