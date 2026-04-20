@@ -1,4 +1,6 @@
 import os
+import sys
+import glob
 import cv2
 import numpy as np
 from scipy.signal import find_peaks
@@ -567,35 +569,31 @@ def classify_lane(binary_bev, seed_x, band=CLASSIFY_BAND, gap_threshold=CLASSIFY
     return 'solid' if coverage > gap_threshold else 'dashed'
 
 if __name__ == "__main__":
-    video_id="044" #base test
-    #video_id="040" #grande beccheggio
-    #video_id="008" #continua e non
-    #video_id="019" #leggera curva
-    #video_id="029"
-    #video_id="043"
-    datset_path = f"./archive/{video_id}/camera/front_camera/"
+    if len(sys.argv) < 2:
+        print(f"Usage: python3 {sys.argv[0]} '<glob_pattern>'")
+        print(f"  e.g. python3 {sys.argv[0]} 'PandaSetSensorData/archive/044/Camera/front_camera/*.jpg'")
+        sys.exit(1)
 
-    # images id are only jpg files from dataset_path
-    images_id = [file for file in os.listdir(datset_path) if file.endswith(".jpg")]
+    image_files = sorted(glob.glob(sys.argv[1]))
+    if not image_files:
+        print(f"No files matched pattern: {sys.argv[1]}")
+        sys.exit(1)
 
-    print(f"Found {len(images_id)} images in the dataset.")
+    print(f"Found {len(image_files)} images.")
 
     #vidcap alike to read images in sequence
     class ImageSequence:
-        def __init__(self, path):
-            self.path = path
-            self.images_id = [file.replace(".jpg","") for file in os.listdir(path) if file.endswith(".jpg")]
-
-            #since dtasae is based on sequential images, probably from a video, sorting can smooth out the showcase
-            self.images_id.sort() 
+        def __init__(self, file_list):
+            self.file_list = file_list
+            self.images_id = [os.path.splitext(os.path.basename(f))[0] for f in file_list]
             self.index = 0
 
         def read(self, loop=False):
-            if self.index < len(self.images_id):
-                img_path = os.path.join(self.path, f"{self.images_id[self.index]}.jpg")
-                frame = cv2.imread(img_path)
+            if self.index < len(self.file_list):
+                frame = cv2.imread(self.file_list[self.index])
+                img_id = self.images_id[self.index]
                 self.index += 1
-                return True, (frame, self.images_id[self.index - 1])
+                return True, (frame, img_id)
             else:
                 if loop:
                     self.index = 0
@@ -603,7 +601,7 @@ if __name__ == "__main__":
                 else:
                     return True, (None, 0)
 
-    image_sequence = ImageSequence(datset_path)
+    image_sequence = ImageSequence(image_files)
     H_img_to_ground = compute_image_to_ground()
     H_bev_to_img_static = compute_homography_bev_to_img()
     H_img_to_bev_static = np.linalg.inv(H_bev_to_img_static)
