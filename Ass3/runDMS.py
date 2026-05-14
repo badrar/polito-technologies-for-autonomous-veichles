@@ -58,11 +58,14 @@ LEFT_IRIS  = [473, 474, 475, 476, 477]   # Indici iride sinistra
 RIGHT_IRIS = [468, 469, 470, 471, 472]   # Indici iride destra
 NOSE_TIP   = [45, 4, 275]                 # Indici punta naso
 
-# # Punti per il calcolo EAR: [angolo_est, sup1, sup2, angolo_int, inf1, inf2]
-# RIGHT_EYE_EAR = [33, 160, 158, 133, 153, 144]
-# LEFT_EYE_EAR  = [362, 385, 387, 263, 373, 380]
+# Angoli occhio (outer, inner) e contorni palpebre (da outer a inner)
+RIGHT_OUTER, RIGHT_INNER = 33, 133
+RIGHT_UPPER_LID = [246, 161, 160, 159, 158, 157]
+RIGHT_LOWER_LID = [7,   163, 144, 145, 153, 154]
 
-# EAR_THRESHOLD = 0.2
+LEFT_OUTER, LEFT_INNER = 362, 263
+LEFT_UPPER_LID = [466, 388, 387, 386, 385, 384]
+LEFT_LOWER_LID = [249, 390, 373, 374, 380, 381]
 
 
 # def _ear(landmarks, indices, img_w, img_h):
@@ -77,8 +80,53 @@ NOSE_TIP   = [45, 4, 275]                 # Indici punta naso
 #     left  = _ear(face_landmarks, LEFT_EYE_EAR,  img_w, img_h)
 #     return right < threshold and left < threshold
 
+from enum import Enum
+
+class MicrosleepState(Enum):
+    NORMAL    = 0
+    WARNING_4 = 1   # occhi chiusi >= 4s
+    WARNING_7 = 2   # occhi chiusi >= 7s
+    RECOVERY  = 3   # occhi aperti, in attesa dei 2s
+
+
+class MicrosleepDetector:
+    CLOSED_4S   = 4.0
+    CLOSED_7S   = 7.0
+    RECOVERY_2S = 2.0
+
+    def __init__(self):
+        self.state        = MicrosleepState.NORMAL
+        self.closed_since = None   # timestamp inizio chiusura corrente
+        self.opened_since = None   # timestamp inizio apertura (recovery)
+
+    def update(self, is_closed: bool, now: float) -> MicrosleepState:
+        if is_closed:
+            self.opened_since = None          # interrompe recovery
+            if self.closed_since is None:
+                self.closed_since = now
+            closed_dur = now - self.closed_since
+            if closed_dur >= self.CLOSED_7S:
+                self.state = MicrosleepState.WARNING_7
+            elif closed_dur >= self.CLOSED_4S:
+                self.state = MicrosleepState.WARNING_4
+            # se già in WARNING/RECOVERY e chiusura < 4s: stato invariato
+        else:
+            self.closed_since = None
+            if self.state == MicrosleepState.NORMAL:
+                self.opened_since = None
+            else:
+                if self.opened_since is None:
+                    self.opened_since = now
+                if now - self.opened_since >= self.RECOVERY_2S:
+                    self.state = MicrosleepState.NORMAL
+                    self.opened_since = None
+                else:
+                    self.state = MicrosleepState.RECOVERY
+        return self.state
+
+
 class EyeClosureDetector:
-    def __init__(self, perclos_threshold=0.80, history_size=5):
+    def __init__(self, perclos_threshold=0.60, history_size=5):
         self.baseline_aperture = None
         self.perclos_threshold = perclos_threshold  # PERCLOS-80
         self.history = []
@@ -156,10 +204,17 @@ def eyelid_aperture(landmarks, outer_idx, inner_idx, upper_lid_idx, lower_lid_id
     return np.linalg.norm(p_up - p_low)
 
 
+CALIBRATION_SECONDS = 3  # secondi iniziali usati per misurare la baseline
+
+
 def main():
     # ==================== INIZIALIZZAZIONE WEBCAM ====================
     cap = cv2.VideoCapture(0)
     startup_time = time.time()
+
+    detector = EyeClosureDetector()
+    microsleep = MicrosleepDetector()
+    calibration_samples = []
 
     # check args for debug mode
     if len(sys.argv) > 1 and sys.argv[1] == "debug":
@@ -208,14 +263,39 @@ def main():
                     if idx in NOSE_TIP:
                         cv2.circle(image, (x, y), radius=2, color=(255, 0, 0), thickness=-1)
                 
+                # Calcola apertura palpebrale (media occhio sinistro e destro)
+                r_ap = eyelid_aperture(face_landmarks, RIGHT_OUTER, RIGHT_INNER,
+                                       RIGHT_UPPER_LID, RIGHT_LOWER_LID, img_w, img_h)
+                l_ap = eyelid_aperture(face_landmarks, LEFT_OUTER, LEFT_INNER,
+                                       LEFT_UPPER_LID, LEFT_LOWER_LID, img_w, img_h)
+                aperture = np.mean([a for a in [r_ap, l_ap] if a is not None]) if any(
+                    a is not None for a in [r_ap, l_ap]) else None
+
+                # Fase di calibrazione: raccoglie campioni nei primi N secondi
+                elapsed = time.time() - startup_time
+                calibrate_eye_detector(detector, calibration_samples, aperture, elapsed)
+
+                eyes_closed = bool(detector.is_closed(aperture))
+                ms_state = microsleep.update(eyes_closed, time.time())
+
+                if eyes_closed:
+                    cv2.putText(image, 'Eyes closed', (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                else:
+                    cv2.putText(image, 'Eyes open', (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                if ms_state == MicrosleepState.WARNING_7:
+                    cv2.putText(image, '! MICROSLEEP (7s) !', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                elif ms_state == MicrosleepState.WARNING_4:
+                    cv2.putText(image, 'MICROSLEEP (4s)', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
+                elif ms_state == MicrosleepState.RECOVERY:
+                    cv2.putText(image, 'Recovery...', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
                 if debug_mode:
-                    # show if eyes are closed on the image
-                    if are_eyes_closed(face_landmarks, img_w, img_h):
-                        print("Eyes closed")
-                        cv2.putText(image, 'Eyes closed', (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                    else:
-                        print("Eyes open")
-                        cv2.putText(image, 'Eyes open', (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    if aperture is not None and detector.baseline_aperture is not None:
+                        closure_pct = 1.0 - (aperture / detector.baseline_aperture)
+                        print(f"aperture={aperture:.1f}px  baseline={detector.baseline_aperture:.1f}px  closure={closure_pct:.2f}")
+                    if detector.baseline_aperture is None:
+                        cv2.putText(image, f'Calibrating... {elapsed:.1f}s', (10, 120),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
 
             end = time.time()
@@ -236,7 +316,15 @@ def main():
 
     # ==================== PULIZIA RISORSE ====================
     cap.release()                    # Chiude la webcam
-    face_landmarker.close()          # Libera il rilevatore di punti di riferimento
+    face_landmarker.close() 
+
+def calibrate_eye_detector(detector, calibration_samples, aperture, elapsed):
+    if elapsed < CALIBRATION_SECONDS:
+        if aperture is not None:
+            calibration_samples.append(aperture)
+    elif detector.baseline_aperture is None and calibration_samples:
+        detector.calibrate(calibration_samples)
+        print(f"Calibrazione completata: baseline={detector.baseline_aperture:.1f}px")         # Libera il rilevatore di punti di riferimento
 
 
 if __name__ == "__main__":
