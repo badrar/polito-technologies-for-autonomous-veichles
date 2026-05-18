@@ -125,6 +125,94 @@ class MicrosleepDetector:
         return self.state
 
 
+class DistractionState(Enum):
+    NORMAL        = 0
+    WARNING_LONG  = 1   # singolo episodio >= 5s, recovery immediata
+    WARNING_SHORT = 2   # accumulato >= 10s in 30s, recovery 2s
+    RECOVERY      = 3   # attesa 2s prima di tornare NORMAL
+
+
+class DistractionDetector:
+    LONG_THRESHOLD   = 5.0    # s: episodio singolo
+    SHORT_ACCUMULATE = 10.0   # s: totale nella finestra
+    SHORT_WINDOW     = 30.0   # s: ampiezza finestra scorrevole
+    SHORT_RECOVERY   = 2.0    # s: sul strada per uscire dal warning short
+
+    def __init__(self):
+        self.state         = DistractionState.NORMAL
+        self.away_since    = None   # inizio episodio corrente di distrazione
+        self.on_road_since = None   # inizio periodo di ritorno (recovery)
+        self.away_log      = []     # lista (start, end) episodi completati
+
+    def _accumulated_away(self, now: float) -> float:
+        window_start = now - self.SHORT_WINDOW
+        self.away_log = [(s, e) for s, e in self.away_log if e > window_start]
+        total = sum(min(e, now) - max(s, window_start) for s, e in self.away_log)
+        if self.away_since is not None:
+            total += now - max(self.away_since, window_start)
+        return total
+
+    def update(self, is_distracted: bool, now: float) -> DistractionState:
+        if is_distracted:
+            self.on_road_since = None
+            if self.away_since is None:
+                self.away_since = now
+            away_dur    = now - self.away_since
+            accumulated = self._accumulated_away(now)
+            if away_dur >= self.LONG_THRESHOLD:
+                self.state = DistractionState.WARNING_LONG
+            elif accumulated >= self.SHORT_ACCUMULATE and self.state == DistractionState.NORMAL:
+                self.state = DistractionState.WARNING_SHORT
+        else:
+            if self.away_since is not None:
+                self.away_log.append((self.away_since, now))
+                self.away_since = None
+            if self.state == DistractionState.WARNING_LONG:
+                self.state = DistractionState.NORMAL        # recovery immediata
+            elif self.state in (DistractionState.WARNING_SHORT, DistractionState.RECOVERY):
+                if self.on_road_since is None:
+                    self.on_road_since = now
+                self.state = DistractionState.RECOVERY
+                if now - self.on_road_since >= self.SHORT_RECOVERY:
+                    self.state = DistractionState.NORMAL
+                    self.on_road_since = None
+        return self.state
+
+
+def owl_yaw(face_landmarks) -> float:
+    """Deviazione del naso dal centro [0..0.5]. 0 = centrato, 0.5 = profilo."""
+    nose   = face_landmarks[4].x
+    l_corn = face_landmarks[33].x
+    r_corn = face_landmarks[263].x
+    total_w = abs(r_corn - l_corn)
+    if total_w < 1e-6:
+        return 0.0
+    return abs((nose - l_corn) / total_w - 0.5)
+
+
+def lizard_gaze(face_landmarks) -> float:
+    """Offset medio dell'iride rispetto al centro dell'occhio [0..0.5]. 0 = centrato."""
+    def offset(outer_idx, inner_idx, iris_idx):
+        outer = face_landmarks[outer_idx].x
+        inner = face_landmarks[inner_idx].x
+        iris  = face_landmarks[iris_idx].x
+        w = abs(inner - outer)
+        if w < 1e-6:
+            return 0.0
+        center = (outer + inner) / 2
+        return abs(iris - center) / w   # simmetrico, indipendente dall'ordine outer/inner
+
+    return (offset(33, 133, 468) + offset(362, 263, 473)) / 2
+
+
+def is_owl_distracted(face_landmarks, yaw_threshold=0.25) -> bool:
+    return owl_yaw(face_landmarks) > yaw_threshold
+
+
+def is_lizard_distracted(face_landmarks, iris_threshold=0.15) -> bool:
+    return lizard_gaze(face_landmarks) > iris_threshold
+
+
 class EyeClosureDetector:
     def __init__(self, perclos_threshold=0.60, history_size=5):
         self.baseline_aperture = None
@@ -214,7 +302,13 @@ def main():
 
     detector = EyeClosureDetector()
     microsleep = MicrosleepDetector()
-    calibration_samples = []
+    owl_detector    = DistractionDetector()
+    lizard_detector = DistractionDetector()
+    calibration_samples  = []
+    owl_yaw_samples      = []
+    lizard_gaze_samples  = []
+    owl_threshold        = 0.25   # default, sovrascritto dopo calibrazione
+    lizard_threshold     = 0.15   # default, sovrascritto dopo calibrazione
 
     # check args for debug mode
     if len(sys.argv) > 1 and sys.argv[1] == "debug":
@@ -275,6 +369,18 @@ def main():
                 elapsed = time.time() - startup_time
                 calibrate_eye_detector(detector, calibration_samples, aperture, elapsed)
 
+                if elapsed < CALIBRATION_SECONDS:
+                    owl_yaw_samples.append(owl_yaw(face_landmarks))
+                    lizard_gaze_samples.append(lizard_gaze(face_landmarks))
+                elif owl_yaw_samples:
+                    # mediana + 3σ: robusto a movimenti occasionali durante calibrazione
+                    owl_threshold    = float(np.median(owl_yaw_samples)    + 3 * np.std(owl_yaw_samples))
+                    lizard_threshold = float(np.median(lizard_gaze_samples) + 3 * np.std(lizard_gaze_samples))
+                    owl_yaw_samples.clear()
+                    lizard_gaze_samples.clear()
+                    if debug_mode:
+                        print(f"Calibrazione gaze: owl_thr={owl_threshold:.3f}  lizard_thr={lizard_threshold:.3f}")
+
                 eyes_closed = bool(detector.is_closed(aperture))
                 ms_state = microsleep.update(eyes_closed, time.time())
 
@@ -289,6 +395,28 @@ def main():
                     cv2.putText(image, 'MICROSLEEP (4s)', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
                 elif ms_state == MicrosleepState.RECOVERY:
                     cv2.putText(image, 'Recovery...', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+                now = time.time()
+                owl_dist    = is_owl_distracted(face_landmarks, owl_threshold)
+                # Lizard solo se la testa è dritta (altrimenti è Owl)
+                lizard_dist = not owl_dist and is_lizard_distracted(face_landmarks, lizard_threshold)
+
+                owl_state    = owl_detector.update(owl_dist, now)
+                lizard_state = lizard_detector.update(lizard_dist, now)
+
+                y_warn = 190
+                if owl_state == DistractionState.WARNING_LONG:
+                    cv2.putText(image, '! OWL LONG (5s) !', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                elif owl_state == DistractionState.WARNING_SHORT:
+                    cv2.putText(image, 'OWL SHORT (10s/30s)', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
+                elif owl_state == DistractionState.RECOVERY:
+                    cv2.putText(image, 'Owl recovery...', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                elif lizard_state == DistractionState.WARNING_LONG:
+                    cv2.putText(image, '! LIZARD LONG (5s) !', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                elif lizard_state == DistractionState.WARNING_SHORT:
+                    cv2.putText(image, 'LIZARD SHORT (10s/30s)', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
+                elif lizard_state == DistractionState.RECOVERY:
+                    cv2.putText(image, 'Lizard recovery...', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
                 if debug_mode:
                     if aperture is not None and detector.baseline_aperture is not None:
                         closure_pct = 1.0 - (aperture / detector.baseline_aperture)
