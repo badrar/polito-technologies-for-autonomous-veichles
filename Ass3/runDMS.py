@@ -12,6 +12,13 @@ import urllib.request                       # Per scaricare il modello
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision   # Task di visione di MediaPipe
 
+import numpy as np
+from scipy.signal import butter, filtfilt, detrend, welch
+from sklearn.decomposition import FastICA
+from collections import deque
+
+
+
 #? Kinds of distractions:
 #? - Owl long distraction: drivers gaze away from the road for 5s
 #? - - Shall be reported to the driver until the gaze returns to the road
@@ -66,6 +73,13 @@ RIGHT_LOWER_LID = [7,   163, 144, 145, 153, 154]
 LEFT_OUTER, LEFT_INNER = 362, 263
 LEFT_UPPER_LID = [466, 388, 387, 386, 385, 384]
 LEFT_LOWER_LID = [249, 390, 373, 374, 380, 381]
+
+
+# rppg
+
+FOREHEAD_ROI = [109, 10, 338, 337, 336, 9, 107, 108]  # forehad polygon
+BPM_WINDOW_S       = 8.0   # seconds for BPM estimation window
+BPM_UPDATE_EVERY_N = 60     # recompute BPM every N frames (for efficiency)
 
 
 # def _ear(landmarks, indices, img_w, img_h):
@@ -294,10 +308,58 @@ def eyelid_aperture(landmarks, outer_idx, inner_idx, upper_lid_idx, lower_lid_id
 
 CALIBRATION_SECONDS = 3  # secondi iniziali usati per misurare la baseline
 
+def build_mask(img_shape, landmarks, roi_indices):
+    """Maschera binaria del poligono ROI definito dai landmark."""
+    h, w = img_shape[:2]
+    pts = np.array(
+        [[int(landmarks[i].x * w), int(landmarks[i].y * h)] for i in roi_indices],
+        dtype=np.int32,
+    )
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [pts], 255)
+    return mask
+
+# --- livello 1: chiamato ad ogni frame -------------------------------
+def extract_roi_rgb(frame_rgb, landmarks, roi_indices, img_shape):
+    """Media RGB dei pixel dentro la ROI poligonale dei landmark."""
+    mask = build_mask(img_shape, landmarks, roi_indices)  # cv2.fillPoly
+    pixels = frame_rgb[mask > 0]
+    if len(pixels) < 100:   # ROI troppo piccola / occlusione
+        return None
+    return pixels.mean(axis=0)   # shape (3,)
+
+# --- livello 2: chiamato su una finestra di ~10 s --------------------
+def estimate_bpm(rgb_window, fps, hr_band=(0.8, 3.0)):
+    """rgb_window: array (N, 3) di medie RGB consecutive."""
+    # detrend + bandpass + zscore per canale
+    sig = detrend(rgb_window, axis=0)
+    lo, hi = np.array(hr_band) / (fps / 2)
+    b, a = butter(4, [lo, hi], btype='band')
+    sig = filtfilt(b, a, sig, axis=0)
+    sig = (sig - sig.mean(0)) / (sig.std(0) + 1e-8)
+
+    # ICA su 3 canali
+    S = FastICA(n_components=3, max_iter=500, random_state=0,
+            whiten='unit-variance').fit_transform(sig)
+    # per ogni componente: Welch PSD e picco nella banda HR
+    best_bpm, best_power = None, -np.inf
+    for k in range(3):
+        f, P = welch(S[:, k], fs=fps, nperseg=min(1024, len(S)))
+        band = (f >= hr_band[0]) & (f <= hr_band[1])
+        idx = np.argmax(P[band])
+        if P[band][idx] > best_power:
+            best_power = P[band][idx]
+            best_bpm = f[band][idx] * 60
+    return best_bpm
 
 def main():
     # ==================== INIZIALIZZAZIONE WEBCAM ====================
     cap = cv2.VideoCapture(0)
+    capture_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    rgb_buffer  = deque(maxlen=int(BPM_WINDOW_S * capture_fps))
+    frame_count = 0
+    last_bpm    = None
+
     startup_time = time.time()
 
     detector = EyeClosureDetector()
@@ -405,6 +467,17 @@ def main():
                 lizard_state = lizard_detector.update(lizard_dist, now)
 
                 y_warn = 190
+
+                # RPPG: estrazione media RGB da ROI fronte e stima BPM ogni N frame
+                rgb_mean = extract_roi_rgb(image_rgb, face_landmarks, FOREHEAD_ROI, (img_h, img_w))
+                if rgb_mean is not None:
+                    rgb_buffer.append(rgb_mean)
+
+                frame_count += 1
+                if len(rgb_buffer) == rgb_buffer.maxlen and frame_count % BPM_UPDATE_EVERY_N == 0:
+                    last_bpm = estimate_bpm(np.array(rgb_buffer), capture_fps)
+
+                # CV2 oututput
                 if owl_state == DistractionState.WARNING_LONG:
                     cv2.putText(image, '! OWL LONG (5s) !', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
                 elif owl_state == DistractionState.WARNING_SHORT:
@@ -424,6 +497,14 @@ def main():
                     if detector.baseline_aperture is None:
                         cv2.putText(image, f'Calibrating... {elapsed:.1f}s', (10, 120),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                
+                if last_bpm is not None:
+                    cv2.putText(image, f'BPM: {last_bpm:.1f}', (10, 230),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                else:
+                    progress = 100.0 * len(rgb_buffer) / rgb_buffer.maxlen
+                    cv2.putText(image, f'Calibrating HR... {progress:.0f}%', (10, 230),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 0), 2)
 
 
             end = time.time()
