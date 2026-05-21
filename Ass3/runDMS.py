@@ -81,19 +81,6 @@ FOREHEAD_ROI = [109, 10, 338, 337, 336, 9, 107, 108]  # forehad polygon
 BPM_WINDOW_S       = 8.0   # seconds for BPM estimation window
 BPM_UPDATE_EVERY_N = 60     # recompute BPM every N frames (for efficiency)
 
-
-# def _ear(landmarks, indices, img_w, img_h):
-#     pts = [np.array([landmarks[i].x * img_w, landmarks[i].y * img_h]) for i in indices]
-#     vertical = np.linalg.norm(pts[1] - pts[5]) + np.linalg.norm(pts[2] - pts[4])
-#     horizontal = np.linalg.norm(pts[0] - pts[3])
-#     return vertical / (2.0 * horizontal)
-
-
-# def are_eyes_closed(face_landmarks, img_w, img_h, threshold=EAR_THRESHOLD):
-#     right = _ear(face_landmarks, RIGHT_EYE_EAR, img_w, img_h)
-#     left  = _ear(face_landmarks, LEFT_EYE_EAR,  img_w, img_h)
-#     return right < threshold and left < threshold
-
 from enum import Enum
 
 class MicrosleepState(Enum):
@@ -109,9 +96,10 @@ class MicrosleepDetector:
     RECOVERY_2S = 2.0
 
     def __init__(self):
-        self.state        = MicrosleepState.NORMAL
-        self.closed_since = None   # timestamp inizio chiusura corrente
-        self.opened_since = None   # timestamp inizio apertura (recovery)
+        self.state          = MicrosleepState.NORMAL
+        self.closed_since   = None   # timestamp inizio chiusura corrente
+        self.opened_since   = None   # timestamp inizio apertura (recovery)
+        self._recovery_from = None   # stato da cui si sta recuperando
 
     def update(self, is_closed: bool, now: float) -> MicrosleepState:
         if is_closed:
@@ -130,10 +118,12 @@ class MicrosleepDetector:
                 self.opened_since = None
             else:
                 if self.opened_since is None:
-                    self.opened_since = now
+                    self.opened_since   = now
+                    self._recovery_from = self.state
                 if now - self.opened_since >= self.RECOVERY_2S:
-                    self.state = MicrosleepState.NORMAL
-                    self.opened_since = None
+                    self.state          = MicrosleepState.NORMAL
+                    self.opened_since   = None
+                    self._recovery_from = None
                 else:
                     self.state = MicrosleepState.RECOVERY
         return self.state
@@ -225,6 +215,93 @@ def is_owl_distracted(face_landmarks, yaw_threshold=0.25) -> bool:
 
 def is_lizard_distracted(face_landmarks, iris_threshold=0.15) -> bool:
     return lizard_gaze(face_landmarks) > iris_threshold
+
+
+# Colori BGR
+_GREEN  = (0, 200, 0)
+_ORANGE = (0, 165, 255)
+_RED    = (0, 0, 255)
+
+def driver_state_label(ms_state, ms_recovery_from, owl_state, lizard_state):
+    """Restituisce (testo, colore_BGR) con priorità: Sleep > Microsleep > Distracted > Focused."""
+    if ms_state == MicrosleepState.WARNING_7:
+        return "Sleep", _RED
+    if ms_state == MicrosleepState.RECOVERY and ms_recovery_from == MicrosleepState.WARNING_7:
+        return "Sleep", _RED
+    if ms_state in (MicrosleepState.WARNING_4, MicrosleepState.RECOVERY):
+        return "Microsleep", _RED
+    if owl_state == DistractionState.WARNING_LONG or lizard_state == DistractionState.WARNING_LONG:
+        return "Distracted (long)", _RED
+    if owl_state in (DistractionState.WARNING_SHORT, DistractionState.RECOVERY) or \
+       lizard_state in (DistractionState.WARNING_SHORT, DistractionState.RECOVERY):
+        return "Distracted (short)", _ORANGE
+    return "Focused on the road", _GREEN
+
+
+def draw_debug_timers(image, ms_det, owl_det, liz_det, now):
+    """Pannello debug in alto a destra con i timer attivi dei tre detector."""
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1
+    WHITE  = (255, 255, 255)
+    YELLOW = (0, 220, 220)
+    GRAY   = (160, 160, 160)
+
+    def fmt(label, val, target, active):
+        color = YELLOW if active else GRAY
+        text  = f"{label}: {val:.1f}s / {target}s" if active else f"{label}: --"
+        return text, color
+
+    rows = []
+    rows.append(("[ MICROSLEEP ]", WHITE))
+    active = ms_det.closed_since is not None
+    rows.append(fmt("closed", (now - ms_det.closed_since) if active else 0, "4/7", active))
+    active = ms_det.opened_since is not None
+    rows.append(fmt("recov ", (now - ms_det.opened_since) if active else 0, 2, active))
+
+    rows.append(("[ OWL ]", WHITE))
+    active = owl_det.away_since is not None
+    rows.append(fmt("episode", (now - owl_det.away_since) if active else 0, 5, active))
+    acc = owl_det._accumulated_away(now)
+    rows.append((f"accum : {acc:.1f}s / 10s", YELLOW if acc > 0 else GRAY))
+    active = owl_det.on_road_since is not None
+    rows.append(fmt("recov ", (now - owl_det.on_road_since) if active else 0, 2, active))
+
+    rows.append(("[ LIZARD ]", WHITE))
+    active = liz_det.away_since is not None
+    rows.append(fmt("episode", (now - liz_det.away_since) if active else 0, 5, active))
+    acc_l = liz_det._accumulated_away(now)
+    rows.append((f"accum : {acc_l:.1f}s / 10s", YELLOW if acc_l > 0 else GRAY))
+    active = liz_det.on_road_since is not None
+    rows.append(fmt("recov ", (now - liz_det.on_road_since) if active else 0, 2, active))
+
+    line_h = 18
+    pad    = 7
+    panel_w = 220
+    panel_h = len(rows) * line_h + pad * 2
+
+    h, w = image.shape[:2]
+    x1 = w - panel_w - pad
+    y1 = pad
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x1, y1), (x1 + panel_w, y1 + panel_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, image, 0.45, 0, image)
+
+    for i, (text, color) in enumerate(rows):
+        y = y1 + pad + (i + 1) * line_h
+        cv2.putText(image, text, (x1 + pad, y), font, scale, color, thick)
+
+
+def draw_status(image, label, color):
+    """Disegna il label di stato in basso a destra con sfondo semitrasparente."""
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)
+    h, w = image.shape[:2]
+    pad = 8
+    x1, y1 = w - tw - pad * 2, h - th - baseline - pad * 2
+    x2, y2 = w, h
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.5, image, 0.5, 0, image)
+    cv2.putText(image, label, (x1 + pad, y2 - baseline - pad), font, scale, color, thickness)
 
 
 class EyeClosureDetector:
@@ -446,18 +523,6 @@ def main():
                 eyes_closed = bool(detector.is_closed(aperture))
                 ms_state = microsleep.update(eyes_closed, time.time())
 
-                if eyes_closed:
-                    cv2.putText(image, 'Eyes closed', (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                else:
-                    cv2.putText(image, 'Eyes open', (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-                if ms_state == MicrosleepState.WARNING_7:
-                    cv2.putText(image, '! MICROSLEEP (7s) !', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                elif ms_state == MicrosleepState.WARNING_4:
-                    cv2.putText(image, 'MICROSLEEP (4s)', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
-                elif ms_state == MicrosleepState.RECOVERY:
-                    cv2.putText(image, 'Recovery...', (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-
                 now = time.time()
                 owl_dist    = is_owl_distracted(face_landmarks, owl_threshold)
                 # Lizard solo se la testa è dritta (altrimenti è Owl)
@@ -465,8 +530,6 @@ def main():
 
                 owl_state    = owl_detector.update(owl_dist, now)
                 lizard_state = lizard_detector.update(lizard_dist, now)
-
-                y_warn = 190
 
                 # RPPG: estrazione media RGB da ROI fronte e stima BPM ogni N frame
                 rgb_mean = extract_roi_rgb(image_rgb, face_landmarks, FOREHEAD_ROI, (img_h, img_w))
@@ -477,19 +540,8 @@ def main():
                 if len(rgb_buffer) == rgb_buffer.maxlen and frame_count % BPM_UPDATE_EVERY_N == 0:
                     last_bpm = estimate_bpm(np.array(rgb_buffer), capture_fps)
 
-                # CV2 oututput
-                if owl_state == DistractionState.WARNING_LONG:
-                    cv2.putText(image, '! OWL LONG (5s) !', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                elif owl_state == DistractionState.WARNING_SHORT:
-                    cv2.putText(image, 'OWL SHORT (10s/30s)', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
-                elif owl_state == DistractionState.RECOVERY:
-                    cv2.putText(image, 'Owl recovery...', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                elif lizard_state == DistractionState.WARNING_LONG:
-                    cv2.putText(image, '! LIZARD LONG (5s) !', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                elif lizard_state == DistractionState.WARNING_SHORT:
-                    cv2.putText(image, 'LIZARD SHORT (10s/30s)', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
-                elif lizard_state == DistractionState.RECOVERY:
-                    cv2.putText(image, 'Lizard recovery...', (10, y_warn), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                label, color = driver_state_label(ms_state, microsleep._recovery_from, owl_state, lizard_state)
+                draw_status(image, label, color)
                 if debug_mode:
                     if aperture is not None and detector.baseline_aperture is not None:
                         closure_pct = 1.0 - (aperture / detector.baseline_aperture)
@@ -497,6 +549,7 @@ def main():
                     if detector.baseline_aperture is None:
                         cv2.putText(image, f'Calibrating... {elapsed:.1f}s', (10, 120),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                    draw_debug_timers(image, microsleep, owl_detector, lizard_detector, now)
                 
                 if last_bpm is not None:
                     cv2.putText(image, f'BPM: {last_bpm:.1f}', (10, 230),
