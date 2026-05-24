@@ -78,7 +78,7 @@ LEFT_LOWER_LID = [249, 390, 373, 374, 380, 381]
 # rppg
 
 FOREHEAD_ROI = [109, 10, 338, 337, 336, 9, 107, 108]  # forehad polygon
-BPM_WINDOW_S       = 8.0   # seconds for BPM estimation window
+BPM_WINDOW_S       = 10.0   # seconds for BPM estimation window
 BPM_UPDATE_EVERY_N = 60     # recompute BPM every N frames (for efficiency)
 
 from enum import Enum
@@ -520,8 +520,8 @@ def main():
                     lizard_gaze_samples.append(lizard_gaze(face_landmarks))
                 elif owl_yaw_samples:
                     # mediana + 3σ: robusto a movimenti occasionali durante calibrazione
-                    owl_threshold    = float(np.median(owl_yaw_samples)    + 3 * np.std(owl_yaw_samples))
-                    lizard_threshold = float(np.median(lizard_gaze_samples) + 3 * np.std(lizard_gaze_samples))
+                    owl_threshold    = float(np.median(owl_yaw_samples)    + max(3 * np.std(owl_yaw_samples), 0.12))
+                    lizard_threshold = float(np.median(lizard_gaze_samples) + max(np.std(lizard_gaze_samples), 0.03))
                     owl_yaw_samples.clear()
                     lizard_gaze_samples.clear()
                     if debug_mode:
