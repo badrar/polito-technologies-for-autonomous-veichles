@@ -5,14 +5,12 @@ import cv2                                  # OpenCV for image/video processing
 import mediapipe as mp                      # MediaPipe for face detection
 import numpy as np                          # NumPy for numerical operations
 import time                                 # Time measurement
-import statistics as st                     # Statistics (unused)
 import os                                   # File path utilities
 import urllib.request                       # Model download
 
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision   # MediaPipe vision tasks
 
-import numpy as np
 from scipy.signal import butter, filtfilt, detrend, welch
 from sklearn.decomposition import FastICA
 from collections import deque
