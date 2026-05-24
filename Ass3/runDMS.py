@@ -1,3 +1,14 @@
+# =================== DRIVER MONITORING SYSTEM (DMS) ====================
+# Assignment 3: Real-time driver state monitoring using MediaPipe Face Landmarker
+# Technologies for autonomous veichles, Politecnico di Torino, A.Y. 2025/26
+
+
+# ===========================================================================
+# USAGE:
+#   python runDMS.py [--debug]
+# =============================================================================
+
+
 # ==================== IMPORTS ====================
 import sys
 
