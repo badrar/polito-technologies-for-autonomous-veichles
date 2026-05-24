@@ -449,12 +449,13 @@ def main():
     owl_threshold        = 0.25   # default, sovrascritto dopo calibrazione
     lizard_threshold     = 0.15   # default, sovrascritto dopo calibrazione
 
-    # check args for debug mode
-    if len(sys.argv) > 1 and sys.argv[1] == "debug":
+    debug_mode = "--debug" in sys.argv
+    if debug_mode:
         print("Debug mode enabled")
-        debug_mode = True
-    else:
-        debug_mode = False
+
+    video_writer = None
+    _frame_times: list[float] = []   # per misurare FPS reale prima di aprire il writer
+    _WARMUP = 30                     # frame di warmup per stima FPS
 
     # ==================== LOOP PRINCIPALE ====================
     while cap.isOpened():
@@ -475,7 +476,13 @@ def main():
         timestamp_ms = int(time.time() * 1000)  # Timestamp in millisecondi
         results = face_landmarker.detect_for_video(mp_image, timestamp_ms)  # Rileva punti di riferimento
 
-        img_h, img_w, _ = image.shape  # Dimensioni dell'immagine
+        img_h, img_w, _ = image.shape
+
+        _frame_times.append(time.time())
+        if video_writer is None and len(_frame_times) >= _WARMUP:
+            real_fps = (_WARMUP - 1) / (_frame_times[-1] - _frame_times[0])
+            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+            video_writer = cv2.VideoWriter("dms_output.avi", fourcc, real_fps, (img_w, img_h))
 
         # ==================== DISEGNO PUNTI DI RIFERIMENTO ====================
         if results.face_landmarks:  # Se è stato rilevato un volto
@@ -570,15 +577,20 @@ def main():
             #show total run time on the image
             cv2.putText(image, f'Time: {(time.time()-startup_time):.2f}s', (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
 
-            cv2.imshow('output window', image)  # Mostra il frame con i punti disegnati
+            cv2.imshow('output window', image)
+
+        if video_writer is not None:
+            video_writer.write(image)
 
         # Premi ESC (tasto 27) per uscire dal programma
         if cv2.waitKey(5) & 0xFF == 27:
             break
 
     # ==================== PULIZIA RISORSE ====================
-    cap.release()                    # Chiude la webcam
-    face_landmarker.close() 
+    cap.release()
+    if video_writer is not None:
+        video_writer.release()
+    face_landmarker.close()
 
 def calibrate_eye_detector(detector, calibration_samples, aperture, elapsed):
     if elapsed < CALIBRATION_SECONDS:
