@@ -559,12 +559,23 @@ def main():
                     draw_debug_timers(image, microsleep, owl_detector, lizard_detector, now)
                 
                 if last_bpm is not None:
-                    cv2.putText(image, f'BPM: {last_bpm:.1f}', (10, 230),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                    _bpm_label = f'BPM: {last_bpm:.1f}'
+                    _bpm_font, _bpm_scale, _bpm_thick = cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2
+                    _bpm_color = (0, 255, 255)
                 else:
                     progress = 100.0 * len(rgb_buffer) / rgb_buffer.maxlen
-                    cv2.putText(image, f'Calibrating HR... {progress:.0f}%', (10, 230),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 0), 2)
+                    _bpm_label = f'Calibrating HR... {progress:.0f}%'
+                    _bpm_font, _bpm_scale, _bpm_thick = cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+                    _bpm_color = (200, 200, 0)
+                (bpm_tw, bpm_th), bpm_bl = cv2.getTextSize(_bpm_label, _bpm_font, _bpm_scale, _bpm_thick)
+                bpm_pad = 8
+                bpm_x1, bpm_y1 = 0, img_h - bpm_th - bpm_bl - bpm_pad * 2
+                bpm_x2, bpm_y2 = bpm_tw + bpm_pad * 2, img_h
+                bpm_overlay = image.copy()
+                cv2.rectangle(bpm_overlay, (bpm_x1, bpm_y1), (bpm_x2, bpm_y2), (80, 80, 80), -1)
+                cv2.addWeighted(bpm_overlay, 0.5, image, 0.5, 0, image)
+                cv2.putText(image, _bpm_label, (bpm_x1 + bpm_pad, bpm_y2 - bpm_bl - bpm_pad),
+                            _bpm_font, _bpm_scale, _bpm_color, _bpm_thick)
 
 
             end = time.time()
