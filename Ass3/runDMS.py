@@ -17,25 +17,6 @@ from scipy.signal import butter, filtfilt, detrend, welch
 from sklearn.decomposition import FastICA
 from collections import deque
 
-
-
-#? Kinds of distractions:
-#? - Owl long distraction: drivers gaze away from the road for 5s
-#? - - Shall be reported to the driver until the gaze returns to the road
-#? - Owl short distraction: drivers gaze away from the road and back to the 
-#?      road for a total of 10s within 30s
-#? - - Shall be reported to the driver until the gaze returns to the road for 2s
-#? - Lizard long distraction: same as owl, but the head remains in
-#?     forward gaze position, while the eyes gaze at a different location
-#? - Lizard short distraction: same as owl, but the head remains in
-#?     forward gaze position, while the eyes gaze at a different location
-#? - Microsleep: warning shall be provided if the driver keeps both eyes
-#?     closed for at least 4 seconds, until the drives keeps the eyes open for >= 2s
-#? - warning shall be provided if the driver keeps both eyes
-#?      closed for at least 7 seconds, until the drives keeps the eyes open for at
-#?      least 2 seconds
-
-
 # ==================== CARICAMENTO MODELLO ====================
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
 if not os.path.exists(MODEL_PATH):
@@ -408,16 +389,22 @@ def extract_roi_rgb(frame_rgb, landmarks, roi_indices, img_shape):
 # --- livello 2: chiamato su una finestra di ~10 s --------------------
 def estimate_bpm(rgb_window, fps, hr_band=(0.8, 3.0)):
     """rgb_window: array (N, 3) di medie RGB consecutive."""
+    # pre-normalizzazione per media di canale: rimuove differenze di DC tra R,G,B
+    sig = rgb_window / (rgb_window.mean(axis=0) + 1e-8)
+
     # detrend + bandpass + zscore per canale
-    sig = detrend(rgb_window, axis=0)
+    sig = detrend(sig, axis=0)
     lo, hi = np.array(hr_band) / (fps / 2)
+    # filters
     b, a = butter(4, [lo, hi], btype='band')
     sig = filtfilt(b, a, sig, axis=0)
     sig = (sig - sig.mean(0)) / (sig.std(0) + 1e-8)
 
-    # ICA su 3 canali
-    S = FastICA(n_components=3, max_iter=500, random_state=0,
-            whiten='unit-variance').fit_transform(sig)
+    # inizializzazione ICA: verde come prima direzione (segnale PPG più forte)
+    w_init = np.eye(3)[[1, 0, 2]]   # shape (3,3): green first, poi R, poi B
+    S = FastICA(n_components=3, max_iter=500, w_init=w_init,
+                whiten='unit-variance').fit_transform(sig)
+
     # per ogni componente: Welch PSD e picco nella banda HR
     best_bpm, best_power = None, -np.inf
     for k in range(3):
@@ -436,6 +423,7 @@ def main():
     rgb_buffer  = deque(maxlen=int(BPM_WINDOW_S * capture_fps))
     frame_count = 0
     last_bpm    = None
+    bpm_history = deque(maxlen=5)   # storico per filtrare picchi spurii
 
     startup_time = time.time()
 
@@ -545,10 +533,21 @@ def main():
 
                 frame_count += 1
                 if len(rgb_buffer) == rgb_buffer.maxlen and frame_count % BPM_UPDATE_EVERY_N == 0:
-                    last_bpm = estimate_bpm(np.array(rgb_buffer), capture_fps)
+                    raw_bpm = estimate_bpm(np.array(rgb_buffer), capture_fps)
+                    if raw_bpm is not None:
+                        med = np.median(bpm_history) if bpm_history else raw_bpm
+                        if not bpm_history or abs(raw_bpm - med) <= 20:
+                            bpm_history.append(raw_bpm)
+                            last_bpm = np.mean(bpm_history)
 
                 label, color = driver_state_label(ms_state, microsleep._recovery_from, owl_state, lizard_state)
                 draw_status(image, label, color)
+                if debug_mode:
+                    pts = np.array([[int(face_landmarks[i].x * img_w),
+                                     int(face_landmarks[i].y * img_h)]
+                                    for i in FOREHEAD_ROI], dtype=np.int32)
+                    cv2.polylines(image, [pts], isClosed=True, color=(0, 255, 255), thickness=1)
+
                 if debug_mode:
                     if aperture is not None and detector.baseline_aperture is not None:
                         closure_pct = 1.0 - (aperture / detector.baseline_aperture)
